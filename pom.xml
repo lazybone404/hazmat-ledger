@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+	xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+	<parent>
+		<groupId>org.springframework.boot</groupId>
+		<artifactId>spring-boot-starter-parent</artifactId>
+		<version>3.5.6</version>
+		<relativePath/>
+	</parent>
+	<groupId>com.lazybone</groupId>
+	<artifactId>hazmat-ledger</artifactId>
+	<version>0.0.1-SNAPSHOT</version>
+	<name>hazmat-ledger</name>
+	<description>高校实验室危化品领用与台账管理：审批状态机、并发出库、库存流水</description>
+
+	<properties>
+		<java.version>21</java.version>
+	</properties>
+
+	<dependencies>
+		<!-- Web：REST 接口 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-web</artifactId>
+		</dependency>
+
+		<!-- Validation：请求参数校验 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-validation</artifactId>
+		</dependency>
+
+		<!-- JPA：对象关系映射 -->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-jpa</artifactId>
+		</dependency>
+
+		<!--
+			认证：无状态 JWT。项目没有前端会话，用 Bearer token 比 session 更适合
+			「接口就是产品」的形态；也避免把登录态放进内存后多实例不一致。
+		-->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-security</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-oauth2-resource-server</artifactId>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-oauth2-jose</artifactId>
+		</dependency>
+
+		<!--
+			Redis：**只用来缓存试剂档案，不用来碰库存与台账**。
+
+			这条边界是这层缓存存在的全部理由：档案是读多写少、陈旧无害的数据
+			（CAS 号不会因为缓存 30 秒就变错），库存与流水是账，任何一秒的陈旧
+			都等于错账。所以缓存只放在 hazmat:chemical:{id} 上，扣减与状态变更
+			仍然全部走数据库的条件更新与版本号，不经过缓存。
+
+			没有 Redisson：这里不需要分布式锁。单实例部署时 JVM 内的
+			ReentrantLock 就够，多实例时并发语义仍由数据库保证。
+			也没有连接池：Lettuce 单连接是线程安全的，缓存操作的并发量远低于
+			它需要池化的程度。Redis 不可用时全部降级为直接查库（见 ChemicalCache）。
+		-->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-data-redis</artifactId>
+		</dependency>
+
+		<!--
+			数据库迁移：表结构由 SQL 脚本定义，不再让 Hibernate 猜。
+			ddl-auto 因此降为 validate——启动时只校验实体与表是否对得上，
+			对不上直接失败，而不是在运行时才发现少一列。
+		-->
+		<dependency>
+			<groupId>org.flywaydb</groupId>
+			<artifactId>flyway-core</artifactId>
+		</dependency>
+		<!-- Flyway 11 起 MySQL 支持拆成独立模块，只加 core 连 MySQL 会报 No database found -->
+		<dependency>
+			<groupId>org.flywaydb</groupId>
+			<artifactId>flyway-mysql</artifactId>
+		</dependency>
+
+		<!-- H2：内置内存库，免外部服务即可跑通与测试 -->
+		<dependency>
+			<groupId>com.h2database</groupId>
+			<artifactId>h2</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+
+		<!-- MySQL：真实数据库驱动 -->
+		<dependency>
+			<groupId>com.mysql</groupId>
+			<artifactId>mysql-connector-j</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+
+		<!--
+			运行时观测：/actuator/health 供容器与负载均衡探活，/actuator/info 暴露版本。
+			只开这两个端点；env、heapdump 之类默认不暴露，避免把配置和内存内容放出去。
+		-->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+
+		<!--
+			MyBatis-Plus：只用于只读报表（GROUP BY / CASE WHEN 这类聚合 SQL）。
+
+			不把 JPA 换掉，也不做双写：写路径、实体、乐观锁、条件更新全部留在 JPA，
+			报表侧只读、只返回自己的 DTO，不共享实体。这样两边各管一块，
+			不会出现「同一个实体两套映射、谁改了字段另一边不知道」的问题。
+
+			版本对齐 Spring Boot 3.x，starter 名字里的 boot3 不能省
+			（boot2 版用的是 javax.*，在 Spring Boot 3 上直接起不来）。
+		-->
+		<dependency>
+			<groupId>com.baomidou</groupId>
+			<artifactId>mybatis-plus-spring-boot3-starter</artifactId>
+			<version>3.5.18</version>
+		</dependency>
+
+		<!--
+			接口文档：/swagger-ui.html 与 /v3/api-docs。
+			springdoc 不在 Spring Boot 的依赖管理里，版本必须显式写；2.8.x 对应 Boot 3.4/3.5。
+		-->
+		<dependency>
+			<groupId>org.springdoc</groupId>
+			<artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+			<version>2.8.9</version>
+		</dependency>
+
+		<dependency>
+			<groupId>org.projectlombok</groupId>
+			<artifactId>lombok</artifactId>
+			<optional>true</optional>
+		</dependency>
+
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.springframework.security</groupId>
+			<artifactId>spring-security-test</artifactId>
+			<scope>test</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<plugins>
+			<plugin>
+				<groupId>org.springframework.boot</groupId>
+				<artifactId>spring-boot-maven-plugin</artifactId>
+			</plugin>
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-surefire-plugin</artifactId>
+				<configuration>
+					<!--
+						测试里不灌种子数据。系统属性优先级高于 application.properties，
+						一条就能盖住全部测试类，不用逐个改 @SpringBootTest。
+						否则断言精确条数的测试会被种子数据打破。
+					-->
+					<systemPropertyVariables>
+						<hazmat.seed.enabled>false</hazmat.seed.enabled>
+						<!-- 测试里不自动建演示账号：需要登录的测试自己插入用户，避免和断言互相影响 -->
+						<hazmat.security.seed-users>false</hazmat.security.seed-users>
+						<!-- 测试里不自动启动后台编码：需要验证的测试同步调用，避免后台线程与断言并发 -->
+						<hazmat.ai.encode-on-startup>false</hazmat.ai.encode-on-startup>
+						<!--
+							默认不连 Redis：全部测试套件不该因为本机有没有 Redis 而红绿不同。
+							缓存逻辑由 ChemicalCacheTest 直接对 ChemicalCache 做单测（mock 掉
+							StringRedisTemplate），降级路径由独立上下文显式打开开关验证。
+						-->
+						<hazmat.cache.chemical.enabled>false</hazmat.cache.chemical.enabled>
+					</systemPropertyVariables>
+				</configuration>
+			</plugin>
+		</plugins>
+	</build>
+
+</project>
