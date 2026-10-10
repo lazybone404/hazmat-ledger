@@ -1,0 +1,27 @@
+# 构建产物
+target/
+dist/
+build/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# 依赖
+node_modules/
+
+# 日志
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# 密钥（永远不要提交）
+.env
+.env.local
+*.pem
+*.key
+application-local.properties
+application-secret.properties
