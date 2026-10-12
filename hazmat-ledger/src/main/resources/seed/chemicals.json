@@ -1,0 +1,342 @@
+[
+  {
+    "casNo": "64-17-5",
+    "name": "无水乙醇",
+    "category": "易燃",
+    "hazardLevel": "中",
+    "unit": "mL",
+    "spec": "AR 500mL",
+    "msdsUrl": "https://msds.example/64-17-5.pdf",
+    "batches": [
+      {
+        "batchNo": "ET-2025-11",
+        "quantity": 4000,
+        "location": "危化品柜 A-1",
+        "inboundDaysAgo": 343,
+        "expireInDays": 416
+      },
+      {
+        "batchNo": "ET-2024-03",
+        "quantity": 500,
+        "location": "危化品柜 A-1",
+        "inboundDaysAgo": 953,
+        "expireInDays": -25
+      }
+    ]
+  },
+  {
+    "casNo": "67-56-1",
+    "name": "甲醇",
+    "category": "易燃",
+    "hazardLevel": "高",
+    "unit": "mL",
+    "spec": "AR 500mL",
+    "msdsUrl": "https://msds.example/67-56-1.pdf",
+    "batches": [
+      {
+        "batchNo": "ME-2026-02",
+        "quantity": 3000,
+        "location": "危化品柜 A-2",
+        "inboundDaysAgo": 251,
+        "expireInDays": 506
+      }
+    ]
+  },
+  {
+    "casNo": "67-64-1",
+    "name": "丙酮",
+    "category": "易燃",
+    "hazardLevel": "中",
+    "unit": "mL",
+    "spec": "AR 500mL",
+    "msdsUrl": "https://msds.example/67-64-1.pdf",
+    "batches": [
+      {
+        "batchNo": "AC-2026-01",
+        "quantity": 2500,
+        "location": "危化品柜 A-2",
+        "inboundDaysAgo": 282,
+        "expireInDays": 325
+      }
+    ]
+  },
+  {
+    "casNo": "7647-01-0",
+    "name": "盐酸",
+    "category": "腐蚀",
+    "hazardLevel": "高",
+    "unit": "mL",
+    "spec": "GR 500mL",
+    "msdsUrl": "https://msds.example/7647-01-0.pdf",
+    "batches": [
+      {
+        "batchNo": "HC-2026-05",
+        "quantity": 6000,
+        "location": "酸碱柜 B-1",
+        "inboundDaysAgo": 162,
+        "expireInDays": 233
+      },
+      {
+        "batchNo": "HC-2025-09",
+        "quantity": 800,
+        "location": "酸碱柜 B-1",
+        "inboundDaysAgo": 404,
+        "expireInDays": 10
+      }
+    ]
+  },
+  {
+    "casNo": "7664-93-9",
+    "name": "硫酸",
+    "category": "腐蚀",
+    "hazardLevel": "高",
+    "unit": "mL",
+    "spec": "GR 500mL",
+    "msdsUrl": "https://msds.example/7664-93-9.pdf",
+    "batches": [
+      {
+        "batchNo": "SU-2026-03",
+        "quantity": 5000,
+        "location": "酸碱柜 B-1",
+        "inboundDaysAgo": 223,
+        "expireInDays": 538
+      }
+    ]
+  },
+  {
+    "casNo": "7697-37-2",
+    "name": "硝酸",
+    "category": "易制爆",
+    "hazardLevel": "高",
+    "unit": "mL",
+    "spec": "GR 500mL",
+    "msdsUrl": "https://msds.example/7697-37-2.pdf",
+    "batches": [
+      {
+        "batchNo": "NI-2026-04",
+        "quantity": 2000,
+        "location": "易制爆专柜 C-1",
+        "inboundDaysAgo": 192,
+        "expireInDays": 202
+      }
+    ]
+  },
+  {
+    "casNo": "1310-73-2",
+    "name": "氢氧化钠",
+    "category": "腐蚀",
+    "hazardLevel": "中",
+    "unit": "g",
+    "spec": "AR 500g",
+    "msdsUrl": "https://msds.example/1310-73-2.pdf",
+    "batches": [
+      {
+        "batchNo": "NA-2026-01",
+        "quantity": 3000,
+        "location": "酸碱柜 B-2",
+        "inboundDaysAgo": 282,
+        "expireInDays": 844
+      }
+    ]
+  },
+  {
+    "casNo": "1336-21-6",
+    "name": "氨水",
+    "category": "腐蚀",
+    "hazardLevel": "中",
+    "unit": "mL",
+    "spec": "AR 500mL",
+    "msdsUrl": "https://msds.example/1336-21-6.pdf",
+    "batches": [
+      {
+        "batchNo": "AM-2025-12",
+        "quantity": 1200,
+        "location": "酸碱柜 B-2",
+        "inboundDaysAgo": 313,
+        "expireInDays": 82
+      }
+    ]
+  },
+  {
+    "casNo": "7722-64-7",
+    "name": "高锰酸钾",
+    "category": "易制爆",
+    "hazardLevel": "高",
+    "unit": "g",
+    "spec": "AR 500g",
+    "msdsUrl": "https://msds.example/7722-64-7.pdf",
+    "batches": [
+      {
+        "batchNo": "PM-2026-02",
+        "quantity": 1500,
+        "location": "易制爆专柜 C-1",
+        "inboundDaysAgo": 251,
+        "expireInDays": 507
+      }
+    ]
+  },
+  {
+    "casNo": "7722-84-1",
+    "name": "过氧化氢 30%",
+    "category": "易制爆",
+    "hazardLevel": "高",
+    "unit": "mL",
+    "spec": "AR 500mL",
+    "msdsUrl": "https://msds.example/7722-84-1.pdf",
+    "postOpenDays": 30,
+    "batches": [
+      {
+        "batchNo": "HP-2026-06",
+        "quantity": 1000,
+        "location": "易制爆专柜 C-2",
+        "inboundDaysAgo": 131,
+        "expireInDays": 263
+      }
+    ]
+  },
+  {
+    "casNo": "60-29-7",
+    "name": "乙醚",
+    "category": "易燃",
+    "hazardLevel": "高",
+    "unit": "mL",
+    "spec": "AR 500mL",
+    "msdsUrl": "https://msds.example/60-29-7.pdf",
+    "postOpenDays": 30,
+    "batches": [
+      {
+        "batchNo": "DE-2026-01",
+        "quantity": 800,
+        "location": "防爆柜 D-1",
+        "inboundDaysAgo": 282,
+        "expireInDays": 113
+      }
+    ]
+  },
+  {
+    "casNo": "67-66-3",
+    "name": "三氯甲烷",
+    "category": "有毒",
+    "hazardLevel": "高",
+    "unit": "mL",
+    "spec": "AR 500mL",
+    "msdsUrl": "https://msds.example/67-66-3.pdf",
+    "batches": [
+      {
+        "batchNo": "CF-2025-10",
+        "quantity": 600,
+        "location": "毒害品柜 E-1",
+        "inboundDaysAgo": 374,
+        "expireInDays": 21
+      }
+    ]
+  },
+  {
+    "casNo": "67-68-5",
+    "name": "二甲基亚砜",
+    "category": "一般",
+    "hazardLevel": "低",
+    "unit": "mL",
+    "spec": "AR 500mL",
+    "msdsUrl": "https://msds.example/67-68-5.pdf",
+    "batches": [
+      {
+        "batchNo": "DM-2026-03",
+        "quantity": 2000,
+        "location": "普通试剂柜 F-1",
+        "inboundDaysAgo": 223,
+        "expireInDays": 903
+      }
+    ]
+  },
+  {
+    "casNo": "141-78-6",
+    "name": "乙酸乙酯",
+    "category": "易燃",
+    "hazardLevel": "中",
+    "unit": "mL",
+    "spec": "AR 500mL",
+    "msdsUrl": "https://msds.example/141-78-6.pdf",
+    "batches": [
+      {
+        "batchNo": "EA-2026-02",
+        "quantity": 1800,
+        "location": "防爆柜 D-1",
+        "inboundDaysAgo": 251,
+        "expireInDays": 355
+      }
+    ]
+  },
+  {
+    "casNo": "108-88-3",
+    "name": "甲苯",
+    "category": "易燃",
+    "hazardLevel": "高",
+    "unit": "mL",
+    "spec": "AR 500mL",
+    "msdsUrl": "https://msds.example/108-88-3.pdf",
+    "batches": [
+      {
+        "batchNo": "TO-2026-01",
+        "quantity": 1500,
+        "location": "防爆柜 D-2",
+        "inboundDaysAgo": 282,
+        "expireInDays": 294
+      }
+    ]
+  },
+  {
+    "casNo": "7664-39-3",
+    "name": "氢氟酸",
+    "category": "有毒",
+    "hazardLevel": "高",
+    "unit": "mL",
+    "spec": "GR 500mL",
+    "msdsUrl": "https://msds.example/7664-39-3.pdf",
+    "batches": [
+      {
+        "batchNo": "HF-2026-01",
+        "quantity": 300,
+        "location": "毒害品柜 E-2",
+        "inboundDaysAgo": 282,
+        "expireInDays": 172
+      }
+    ]
+  },
+  {
+    "casNo": "7761-88-8",
+    "name": "硝酸银",
+    "category": "腐蚀",
+    "hazardLevel": "中",
+    "unit": "g",
+    "spec": "AR 100g",
+    "msdsUrl": "https://msds.example/7761-88-8.pdf",
+    "batches": [
+      {
+        "batchNo": "AG-2025-08",
+        "quantity": 150,
+        "location": "避光柜 G-1",
+        "inboundDaysAgo": 435,
+        "expireInDays": -40
+      }
+    ]
+  },
+  {
+    "casNo": "7757-82-6",
+    "name": "无水硫酸钠",
+    "category": "一般",
+    "hazardLevel": "低",
+    "unit": "g",
+    "spec": "AR 500g",
+    "msdsUrl": "https://msds.example/7757-82-6.pdf",
+    "batches": [
+      {
+        "batchNo": "SS-2026-02",
+        "quantity": 4000,
+        "location": "普通试剂柜 F-2",
+        "inboundDaysAgo": 251,
+        "expireInDays": 994
+      }
+    ]
+  }
+]
