@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+    只读报表 SQL。
+
+    刻意不写 resultMap：列名用下划线，靠 map-underscore-to-camel-case 自动映射。
+    一旦需要给某个字段换名或做类型转换，再补 resultMap，不要提前把 8 个字段抄一遍。
+
+    SQL 必须同时能在 H2 与 MySQL 8 上跑：
+    - 日期截断用 CAST(... AS DATE)，两边都支持；DATE() 函数不在标准里。
+    - 不用窗口函数、CTE：H2 支持，但报表查询保持在三方数据库都能跑的最小交集上。
+
+    timeout="5" 是 JDBC 的 Statement 查询超时（秒），不是 MyBatis 的缓存或重试参数。
+    聚合查询一旦因为数据量增长变慢，没有它就会一直占着连接和 CPU；
+    加上之后超时抛出 SQLTimeoutException，由 ReportService 译成 503。
+    5 秒的取值依据：报表是人与浏览器同步等待的请求，超过 5 秒用户已经在怀疑接口挂了。
+-->
+<mapper namespace="com.lazybone.hazmat.report.ReportMapper">
+
+    <!--
+        按分类 + 单位汇总。
+
+        LEFT JOIN 的 ON 条件里就带上 available_quantity > 0：
+        写成 WHERE 会把「所有批次都用完」的试剂整行过滤掉，
+        而报表需要显示这个试剂存在、只是没库存。
+
+        CASE WHEN 的两个区间互斥：先判已过期，再用 >= today 判临期，
+        否则过期批次会被同时算进「临期」。
+
+        日期一律用 usable_until 而不是 expire_date：开封后可用期可能提前，
+        报表若按包装有效期统计，会和库存视图、效期预警对不上——
+        同一个批次在页面上「已过期」，在报表里算「临期」。
+    -->
+    <select id="stockSummary" resultType="com.lazybone.hazmat.report.StockSummaryRow"
+            timeout="5">
+        SELECT c.category                                   AS category,
+               c.unit                                       AS unit,
+               COUNT(DISTINCT c.id)                         AS chemical_count,
+               COUNT(b.id)                                  AS batch_count,
+               COALESCE(SUM(b.available_quantity), 0)       AS total_available,
+               COALESCE(SUM(CASE WHEN b.usable_until &gt;= #{today}
+                                  AND b.usable_until &lt;= #{threshold}
+                                 THEN b.available_quantity ELSE 0 END), 0) AS expiring_quantity,
+               COALESCE(SUM(CASE WHEN b.usable_until &lt; #{today}
+                                 THEN b.available_quantity ELSE 0 END), 0) AS expired_quantity
+          FROM chemical c
+          LEFT JOIN chemical_batch b
+                 ON b.chemical_id = c.id
+                AND b.available_quantity &gt; 0
+         GROUP BY c.category, c.unit
+         ORDER BY c.category, c.unit
+    </select>
+
+    <!--
+        按日期 + 变更类型汇总流水。
+
+        ORDER BY 不引用别名 stat_date：MySQL 允许按别名排序，标准 SQL 不允许，
+        H2 的行为也随版本变过。重复写 CAST 表达式最稳，代价可以忽略。
+    -->
+    <select id="flowTrend" resultType="com.lazybone.hazmat.report.FlowTrendRow"
+            timeout="5">
+        SELECT CAST(created_at AS DATE)     AS stat_date,
+               change_type                  AS change_type,
+               COUNT(*)                     AS record_count,
+               COALESCE(SUM(quantity), 0)   AS total_quantity
+          FROM stock_ledger
+         WHERE created_at &gt;= #{since}
+         GROUP BY CAST(created_at AS DATE), change_type
+         ORDER BY CAST(created_at AS DATE) DESC, change_type
+    </select>
+
+</mapper>
