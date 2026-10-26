@@ -1,0 +1,75 @@
+package com.lazybone.hazmat.controller;
+
+import com.lazybone.hazmat.common.ApiResponse;
+import com.lazybone.hazmat.dto.MsdsIndexStatus;
+import com.lazybone.hazmat.dto.MsdsReindexResult;
+import com.lazybone.hazmat.dto.MsdsSearchResult;
+import com.lazybone.hazmat.msds.MsdsIndexService;
+import com.lazybone.hazmat.msds.MsdsSearchService;
+import com.lazybone.hazmat.msds.MsdsVectorService;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+
+/**
+ * MSDS 安全问答。当前提供检索原文与手动重建索引，
+ * 生成式回答（带引用的自然语言答复）在后续阶段接入 {@code /ask}。
+ */
+@RestController
+@RequestMapping("/api/msds")
+public class MsdsController {
+
+    private final MsdsSearchService searchService;
+    private final MsdsIndexService indexService;
+    private final MsdsVectorService vectorService;
+
+    public MsdsController(MsdsSearchService searchService,
+                          MsdsIndexService indexService,
+                          MsdsVectorService vectorService) {
+        this.searchService = searchService;
+        this.indexService = indexService;
+        this.vectorService = vectorService;
+    }
+
+    /**
+     * 检索 MSDS 原文：字面路与向量路融合，降级信息随结果返回。
+     *
+     * @param q     查询内容，如「甲醇误食怎么办」
+     * @param casNo 可选，限定某一种试剂
+     * @param topK  返回条数，默认 5，最多 20
+     */
+    @GetMapping("/search")
+    public ApiResponse<MsdsSearchResult> search(@RequestParam("q") String q,
+                                                @RequestParam(value = "casNo", required = false) String casNo,
+                                                @RequestParam(value = "topK", defaultValue = "5") int topK) {
+        return ApiResponse.ok(searchService.search(q, casNo, topK));
+    }
+
+    /**
+     * 重建索引：先扫文件增量落块，再按四元组决定是否作废旧向量，最后在后台开始编码。
+     *
+     * 编码不同步执行——有 key 时要调几十次模型，接口不能挂在那里等。
+     * 进度和失败原因查 {@code /api/msds/status}。
+     *
+     * <b>限 ADMIN。</b>重建会清失败暂停并触发模型调用，是花钱且影响全局索引的操作，
+     * 不能对普通账号开放。
+     */
+    @PostMapping("/reindex")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ApiResponse<MsdsReindexResult> reindex() {
+        MsdsIndexService.RebuildResult rebuild = indexService.rebuild();
+        MsdsVectorService.ResetResult vectors = vectorService.prepareForReindex();
+        vectorService.scheduleEncoding();
+        return ApiResponse.ok(new MsdsReindexResult(rebuild, vectors));
+    }
+
+    /** 向量索引状态：进度、暂停原因、模型与四元组是否一致。限 ADMIN。 */
+    @GetMapping("/status")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ApiResponse<MsdsIndexStatus> status() {
+        return ApiResponse.ok(vectorService.status());
+    }
+}
