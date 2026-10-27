@@ -1,0 +1,14 @@
+# 构建上下文只需要 pom、src 与构建镜像配置。
+# target 一定要排除：宿主机构建的 jar 会混进上下文，还可能带着旧代码。
+target/
+build/
+.git/
+.gitignore
+.idea/
+.vscode/
+*.iml
+docs/
+README.md
+tools/
+compose.yaml
+.dockerignore
