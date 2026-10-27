@@ -1,0 +1,31 @@
+{
+  "questions": [
+    {"id": "s1", "type": "semantic", "query": "误食甲醇怎么办", "answers": [{"casNo": "67-56-1", "sectionNo": 4}]},
+    {"id": "s2", "type": "semantic", "query": "酸溅到眼睛里怎么处理", "answers": [{"casNo": "7664-93-9", "sectionNo": 4}, {"casNo": "7647-01-0", "sectionNo": 4}]},
+    {"id": "s3", "type": "semantic", "query": "氢氟酸沾到皮肤上怎么办", "answers": [{"casNo": "7664-39-3", "sectionNo": 4}]},
+    {"id": "s4", "type": "semantic", "query": "乙醇着火用什么灭火器", "answers": [{"casNo": "64-17-5", "sectionNo": 5}]},
+    {"id": "s5", "type": "semantic", "query": "丙酮洒在地上怎么处理", "answers": [{"casNo": "67-64-1", "sectionNo": 6}]},
+    {"id": "s6", "type": "semantic", "query": "氨水泄漏要不要疏散人员", "answers": [{"casNo": "1336-21-6", "sectionNo": 6}]},
+    {"id": "s7", "type": "semantic", "query": "甲醇中毒有什么症状", "answers": [{"casNo": "67-56-1", "sectionNo": 11}]},
+    {"id": "s8", "type": "semantic", "query": "过氧化氢会自己分解吗", "answers": [{"casNo": "7722-84-1", "sectionNo": 10}]},
+
+    {"id": "e1", "type": "exact", "query": "甲醇的闪点是多少", "answers": [{"casNo": "67-56-1", "sectionNo": 9}]},
+    {"id": "e2", "type": "exact", "query": "硫酸的 CAS 号是多少", "answers": [{"casNo": "7664-93-9", "sectionNo": 3}]},
+    {"id": "e3", "type": "exact", "query": "氢氧化钠应该怎么储存", "answers": [{"casNo": "1310-73-2", "sectionNo": 7}]},
+    {"id": "e4", "type": "exact", "query": "甲苯的沸点", "answers": [{"casNo": "108-88-3", "sectionNo": 9}]},
+    {"id": "e5", "type": "exact", "query": "乙酸乙酯的密度", "answers": [{"casNo": "141-78-6", "sectionNo": 9}]},
+    {"id": "e6", "type": "exact", "query": "硝酸的运输编号", "answers": [{"casNo": "7697-37-2", "sectionNo": 14}]},
+    {"id": "e7", "type": "exact", "query": "盐酸操作要戴什么防护", "answers": [{"casNo": "7647-01-0", "sectionNo": 8}]},
+    {"id": "e8", "type": "exact", "query": "乙醚怎么废弃", "answers": [{"casNo": "60-29-7", "sectionNo": 13}]},
+
+    {"id": "m1", "type": "mixed", "query": "乙醇泄漏怎么处理，要疏散吗", "answers": [{"casNo": "64-17-5", "sectionNo": 6}]},
+    {"id": "m2", "type": "mixed", "query": "甲醇着火怎么灭", "answers": [{"casNo": "67-56-1", "sectionNo": 5}]},
+    {"id": "m3", "type": "mixed", "query": "高锰酸钾不能和什么混放", "answers": [{"casNo": "7722-64-7", "sectionNo": 10}]},
+    {"id": "m4", "type": "mixed", "query": "二甲基亚砜的毒性", "answers": [{"casNo": "67-68-5", "sectionNo": 11}]},
+
+    {"id": "t1", "type": "trap", "query": "这瓶试剂能治头痛吗", "answers": []},
+    {"id": "t2", "type": "trap", "query": "甲醇可以当酒喝吗", "answers": []},
+    {"id": "t3", "type": "trap", "query": "硫酸可以当肥料用吗", "answers": []},
+    {"id": "t4", "type": "trap", "query": "实验室经费怎么申请", "answers": []}
+  ]
+}
