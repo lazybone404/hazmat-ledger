@@ -67,4 +67,4 @@ Java 21 · Spring Boot 3.5 · Spring Data JPA · Flyway · MySQL / H2 · Spring 
 | 台账凭什么可信 | `StockLedger.balanceAfter` + `StockService.reconcile` 两层对账 | `RequisitionFlowTest` 余额断言、`StocktakeTest` |
 | 盘点为什么不会吞掉期间业务 | `StocktakeService.confirm`（`WHERE available = :book`） | `StocktakeTest#zeroDiffItemStillVerifiesBookQuantity` |
 | 开封后为什么不再被选中 | `ChemicalBatchRepository.findAvailableBatches` 读 `usable_until` | `BatchOpeningTest#openedBatchPastUsableUntilIsSkippedOnIssue` |
-| 为什么不用 Redis | `StockService` 类注释 + 压测数据 | 量级与压测结果见「设计取舍 4.1」 |
+| 缓存为什么只放档案 | `cache/ChemicalCache` 类注释 + 压测数据 | 边界与降级见「设计取舍 4.1」 |
