@@ -2,7 +2,9 @@
 
 > Spring Boot 3 的危化品全流程台账（默认 H2，可切 MySQL）。核心是两条业务主线：
 > **领用申请 → 审批 → 出库 → 台账**，以及 **盘点 → 调账 → 对账**。
-> 权限、分页、报表、过载兜底是支撑能力；MSDS 检索是独立实验模块，不属于主线。
+> 权限、分页、报表、过载兜底是支撑能力；知识库（MSDS 安全信息检索）已并入主线，
+> 挂在试剂详情的安全入口上；禁忌混放检查用结构化关系表，与在库试剂两两比对，
+> 并按批次柜位判断是否真的同柜存放。
 
 这个文件说清「它是什么、怎么跑、代码在哪」，以及关键设计取舍（第 4 节）。
 
@@ -10,7 +12,7 @@
 
 ## 0. 这个项目讲什么
 
-两条主线；其余是支撑与实验，需要时再展开。
+两条业务主线；知识库与混放检查是旁路功能，检索挂了不影响台账开单。
 
 | 主线 | 链路 | 回答的问题 | 代码位置 |
 |---|---|---|---|
@@ -23,8 +25,19 @@
 支撑能力（不主动展开）：JWT 三档角色、分页与组合查询、只读报表层、过载快速失败、
 开封与可用期（并入主线一的出库环节）。
 
-独立实验（不属于主线）：MSDS 安全信息片段检索，设计见
-[docs/msds-rag-设计.md](docs/msds-rag-设计.md)。
+知识库（旁路功能）：从台账任一试剂点进去，按 CAS 号限定检索 MSDS 原文片段；
+`/api/msds/ask` 在检索之上作答，每条结论带后端生成的 `[n]` 引用。**引用必须能落回
+具体块**：模型输出的编号越界或一个有效引用都没有，整段生成作废，退回原文摘录。
+没有模型时只返回带引用的原文片段；检索为空、降级或片段与问题毫无词面对应时
+明确返回 `answerable=false`，不硬答。检索失败不影响库存与审批。设计见
+[docs/msds-rag-设计.md](docs/msds-rag-设计.md)，取舍依据见
+[docs/架构决策.md](docs/架构决策.md)。
+
+禁忌混放检查（旁路功能）：用 `chemical_incompatibility` 关系表，对当前有实物库存的
+试剂两两比对，再看批次 `location` 是否有交集。**只有同柜才算违规**；规则命中但分柜
+存放的单独返回，提示继续保持分离。命中的组合带出危险原因与 MSDS 出处；**规则表里
+没有的组合显式返回 `uncovered`，不代表可以混放**。见
+[4.8](#48-旁路禁忌混放未覆盖必须显式)。
 
 ---
 
@@ -32,8 +45,8 @@
 
 ```bash
 export JAVA_HOME="/c/Program Files/Java/jdk-21.0.11"   # 见下方「环境要求」
-./mvnw spring-boot:run        # 端口 8090，启动后自动灌 18 条试剂档案、20 个批次
-./mvnw test                   # 125 个测试，不需要任何中间件
+./mvnw spring-boot:run        # 端口 8090，启动后自动灌 18 条试剂档案、21 个批次
+./mvnw test                   # 189 个测试，不需要任何中间件；E4 对照与 E9 生成评测需外部服务，默认跳过（2 个）
 ```
 
 演示用的固定日期数据里特意留了**已过期**和**临期**两类批次，所以启动后直接就能看到预警。
@@ -111,6 +124,10 @@ docker run --rm -p 8090:8090 \
 | POST | `/api/chemicals` | ADMIN | 新建试剂档案（CAS 号唯一）；可选 `postOpenDays` 配置开封后可用天数，不传表示不做开封追踪 |
 | GET | `/api/chemicals?keyword=&category=&hazardLevel=&page=&size=&sort=` | 登录 | 试剂分页列表：关键词匹配名称/CAS，分类与危险等级精确筛选 |
 | GET | `/api/chemicals/expiring?withinDays=` | 登录 | 效期预警分页：仍有库存且 `withinDays` 天内到**可用截止日**（含已过期），按 `usableUntil` 升序 |
+| GET | `/api/chemicals/{id}` | 登录 | 试剂详情（列表只有摘要字段，详情页按 id 取完整档案） |
+| GET | `/api/chemicals/{id}/safety?q=&topK=` | 登录 | **知识库入口**：按该试剂 CAS 限定检索 MSDS，返回章节号、原文与降级原因。没有索引过 MSDS 时返回 `available=false` + 明确提示，不返回空列表 |
+| GET | `/api/incompatibilities` | 登录 | **混放检查**：返回 `conflicts`（同柜且禁配）、`separatedConflicts`（禁配但分柜）、`uncovered`（规则表没记录，**不代表安全**）；每条带 `sharedLocations` |
+| GET | `/api/chemicals/{id}/incompatibilities` | 登录 | 单个试剂的混放检查，含 `locations`、同柜/分柜冲突与未覆盖搭档；无库存时返回 `inStock=false`，不产生虚假冲突 |
 | GET | `/api/chemicals/{id}/ledger?page=&size=&sort=` | 登录 | 某试剂的出入库流水分页，默认按发生时间倒序 |
 | POST | `/api/chemicals/{id}/batches` | ADMIN | 入库，新建批次 |
 | POST | `/api/chemicals/{id}/batches/{batchId}/open` | ADMIN | 开封：记录开封时间与操作人；档案配了 `postOpenDays` 时把可用截止日提前为 `min(包装有效期, 开封日 + 天数)` |
@@ -132,6 +149,7 @@ docker run --rm -p 8090:8090 \
 | POST | `/api/requisitions/{reqNo}/close` | ADMIN | 核销 |
 | POST | `/api/requisitions/{reqNo}/cancel` | 登录（仅本人） | 撤回 |
 | GET | `/api/msds/search?q=&casNo=&topK=` | 登录 | 检索 MSDS 片段。`q` 必填、上限 200 字符，`casNo` 可选，`topK` 默认 5、上限 20。返回 `MsdsSearchResult`：命中列表（每条带 `sources`）+ 降级原因 + 索引状态 |
+| GET | `/api/msds/ask?q=&casNo=&topK=` | 登录 | 检索并作答。返回 `MsdsAnswer`：`answerable` / `generated` / `answer` / `citations` / `degraded` / `degradedReason`。引用由后端从命中生成，模型只能选编号（最多前 5 条）；无模型或调用失败退回原文摘录（`generated=false`），无依据时 `answerable=false` |
 | POST | `/api/msds/reindex` | ADMIN | 扫描 `resources/msds/*.md` 增量落块；四元组变了就作废旧向量，然后在后台开始编码 |
 | GET | `/api/msds/status` | ADMIN | 向量索引状态：进度、暂停原因、当前模型、元数据是否需重建 |
 | GET | `/api/reports/stock-summary?withinDays=` | 登录 | 库存汇总（MyBatis-Plus）：按分类 + 单位给出试剂数、批次数、总量、临期量与过期量 |
@@ -302,7 +320,7 @@ UPDATE chemical_batch SET available_quantity = available_quantity - :qty
 | Hikari 连接池 | 10 个连接，等 3 秒 | 抛 `SQLTransientConnectionException` → **503** |
 | Tomcat 工作线程 | 100 线程 + 50 排队 | 超过直接拒绝连接 |
 | 报表 SQL | `Statement` 超时 5 秒 | `SQLTimeoutException` → **503** |
-| MSDS 检索 | 4 个并发许可，等 200ms | 返回 `degraded=true` + 原因，不抛错 |
+| MSDS 向量路 | 4 个并发许可，等 200ms | 跳过向量路，字面结果照常返回，`degraded=true` + 原因；**不返回空列表** |
 | 登录 | 同一用户名 5 次失败 | 锁 1 分钟，锁定期连 BCrypt 都不跑 |
 
 几个决定背后的原因：
@@ -403,6 +421,44 @@ UPDATE chemical_batch SET available_quantity = available_quantity - :qty
 `postOpenDays` 事后修改不回溯已开封批次——可用期在开封那一刻就落库了，这是物化列换来的确定性与代价；
 开封后可用期没有单独的「进度提醒」，靠的是同一套 `withinDays` 预警，所以刚开封就会进入预警窗口。
 
+### 4.8 （旁路）禁忌混放：未覆盖必须显式
+
+「甲醇的禁忌物有哪些」是穷举问题，top-k 检索一定会漏；而混放判定只有两种确定结果：
+**有依据的冲突**，或**没有依据**。所以这里不走向量检索，用一张二元关系表
+（`chemical_incompatibility`）做两两比对。D14 记录了这个取舍。
+
+四个决定：
+
+- **关系键是 CAS 对，不是 chemical.id**。禁忌是化学品本身的化学性质，不随某条档案
+  增删而改变；同一对只存一条，存入时按 CAS 字典序规范化，`CHECK (cas_a < cas_b)`
+  与唯一索引一起杜绝正反序重复。
+- **只比对有实物库存的试剂**。混放是物理存放问题：档案建过但已经用完的试剂不占柜子，
+  算进去只会制造噪音；已过期但瓶里还有东西的批次仍占柜子，所以按
+  `availableQuantity > 0` 筛，而不是按是否过期筛。
+- **同柜才算混放**。规则命中后，再取两种试剂所有在库批次的 `location` 求交集：
+  交集非空才是 `conflicts`；规则命中但当前分柜存放的放进 `separatedConflicts`，
+  只提示「继续保持分离」。每条记录都带 `sharedLocations`，调用方不用自己再查柜位。
+  同一种试剂分放在多个柜位时，只要与搭档在任一柜位相交，就算同柜。
+- **未覆盖单独成字段**。`uncovered` 只表示「规则表没记录」，不是「安全」。如果把它
+  混进冲突列表用空原因表示，前端迟早会显示成绿色。报告额外给出
+  `coStoredUncoveredCount`：同柜但没有规则依据的组合最危险，应优先补资料。
+  `IncompatibilityTest` 专门用「硫酸 + 过氧化氢」锁住这一点：这一对实际很危险，
+  但当前 18 份 MSDS 的第 10 节没有直接禁配表述，所以必须留在未覆盖里等人工补资料。
+- **种子只写有出处的规则**。`seed/incompatibilities.json` 共 51 对，依据全部来自
+  仓库内 MSDS 第 10 节，`source` 写到具体 CAS 的章节，不编造 GB 15603 条款号；
+  `IncompatibilitySeedDataTest` 校验 CAS 拼写、重复对与出处字段。
+- **演示数据里刻意留了一处同柜违规**。过氧化氢在 `易制爆专柜 C-1` 多放了一个批次，
+  与高锰酸钾同柜，用来让混放检查启动后就有真实结果可看；生产环境应关闭演示种子
+  （`hazmat.seed.enabled=false`）或移走该批次。
+
+**已知边界**：当前 51 对只覆盖种子里的 18 种试剂，换一批试剂必须重新导入关系；
+还没有按 GB 15603 条款号建立完整关系表。接口返回「无冲突」只说明**已知规则里没有冲突**，
+不能当成全库安全结论——这也是 `uncovered` 必须与 `conflicts` 一起展示的原因。
+
+柜位是批次上的自由文本，没有库房/柜位主数据：`危化品柜 A-1` 与 `危化品柜A-1`
+会被当成两个柜，录入不规范会漏报；只判断是否同一柜，不区分柜内层板与隔间，
+同一房间的不同柜也不视为同柜。要做到库房级合规，下一步应把柜位抽成主数据并校验。
+
 ---
 
 ## 5. 代码结构
@@ -413,9 +469,12 @@ src/main/java/com/lazybone/hazmat/
 │                    RequisitionStatus 状态机 / RequisitionLog 流转记录 / StockLedger 库存流水
 │                    Stocktake 盘点单 / StocktakeItem 盘点明细 / StocktakeStatus 盘点状态机
 │                    AppUser 用户 / UserRole 角色 / MsdsChunk MSDS 切块（含 hash 与 vector）
-├── repository/      8 个；扣减、盘点调账、开封 CAS 与状态 CAS 的关键 SQL 都在 ChemicalBatchRepository
+│                    ChemicalIncompatibility 禁忌混放关系（CAS 对 + 原因 + 出处）
+├── repository/      9 个；扣减、盘点调账、开封 CAS 与状态 CAS 的关键 SQL 都在 ChemicalBatchRepository
 ├── service/         StockService 入库出库与对账（核心） / RequisitionService 流程（核心）
 │                    StocktakeService 盘点建单与调账（核心） / ChemicalService
+│                    ChemicalSafetyService 台账与知识库的连接点（试剂 id → CAS → 检索）
+│                    IncompatibilityService 在库试剂两两比对、冲突与未覆盖分开返回
 ├── msds/            MsdsChunker 按章节切块 / MsdsIndexService 增量落库
 │                    MsdsLiteralIndex 内存倒排 / MsdsQueryExpander 同义词
 │                    MsdsVectorIndex 内存向量快照 / MsdsSearchService RRF 融合
@@ -425,6 +484,7 @@ src/main/java/com/lazybone/hazmat/
 │                    ai/ 云端与本地哈希 embedding 客户端、向量编解码
 ├── controller/      AuthController 登录 / ChemicalController / RequisitionController
 │                    StocktakeController 盘点流程 / MsdsController
+│                    IncompatibilityController 全实验室混放检查
 ├── report/          只读报表（MyBatis-Plus）：ReportMapper + XML，库存汇总与出入库趋势
 ├── security/        SecurityConfig JWT 过滤链与角色 / JwtService 签发
 │                    LoginAttemptGuard 登录失败计数与短时锁定
@@ -434,12 +494,13 @@ src/main/java/com/lazybone/hazmat/
 │                    / 503 资源不足 / 500 只记日志）
 │                    PageResponse 分页结构 / PageQuery 页大小上限、排序白名单、LIKE 转义
 └── seed/            SeedRunner 复用真实入库路径灌种子数据；UserSeeder 建演示账号
+                     IncompatibilitySeedRunner 灌禁忌关系（与试剂档案分开，可独立补齐）
 
 src/main/java/com/lazybone/hazmat/bench/
                      BenchDataLoader 压测数据装载（默认关闭，--hazmat.bench.enabled=true 才执行）
 tools/bench/         run-read.sh 读路径压测编排；压测器本体 Bench 只依赖 JDK 21 虚拟线程
 
-src/main/resources/db/migration/   V1 表结构、V2 分页复合索引、V3 盘点表、V4 开封字段、V5 批次号唯一索引；Hibernate 只做 validate，不再自动建表
+src/main/resources/db/migration/   V1 表结构、V2 分页复合索引、V3 盘点表、V4 开封字段、V5 批次号唯一索引、V6 禁忌关系表；Hibernate 只做 validate，不再自动建表
 src/main/resources/mapper/         报表 XML（ReportMapper.xml），只有只读 SELECT
 src/main/resources/msds/           18 份按 GB/T 16483 的 16 节结构整理的演示文本（{casNo}.md）
 src/test/java/com/lazybone/hazmat/
@@ -454,12 +515,30 @@ src/test/java/com/lazybone/hazmat/
 ├── StocktakeTest           建单快照、盘盈盘亏入账、零差异也校验基准、整单回滚、对账
 ├── BatchOpeningTest        开封留痕、可用期取 min、重复/并发开封、过期后不再出库、四处口径统一
 ├── ScrapTest               报废闭环：过期批次出口、跨试剂拒绝、30 线程不超扣
+├── ChemicalSafetyTest      详情接口、安全入口、无 MSDS 的 available=false、401/404/400
+├── IncompatibilityTest     同柜/分柜/未覆盖三分类、多柜位求交集、无规则显式未覆盖、401/404
+├── entity/ChemicalIncompatibilityTest  规则对归一化、拒绝自对与空值
+├── seed/IncompatibilitySeedDataTest    种子 CAS 拼写、重复对、出处完整性
 └── msds/                   MsdsChunkerTest 切块 / MsdsSearchTest 检索与增量重建
                             MsdsFusionTest 融合元数据 / MsdsSearchDegradeTest 降级
-                            MsdsRetrievalEvalTest 24 题 Hit@5 / MsdsThresholdTest 阈值分布
+                            MsdsRetrievalEvalTest 24 题 Hit@5
+                            MsdsRetrievalMetricsTest Hit@1 / MRR@10 / Recall@5
+                            MsdsRrfWeightSweepTest 融合权重扫描
+                            MsdsChunkSizeSweepTest 切块粒度 200/400/800 对照
+                            MsdsEmbeddingCompareTest local-hash vs bge-m3（默认跳过，需 Ollama）
+                            MsdsWeightProfileTest 权重分档（local-hash 3:1 / 语义模型 1:2）
+                            MsdsSemanticWeightTest 语义档权重在检索链路中生效
+                            MsdsThresholdTest 阈值分布
+                            MsdsAskTest 无模型时抽取式回答、casNo 过滤、401
+                            MsdsAnswerServiceTest 空命中的两种语义、意图章节优先、无词面依据拒答
+                            MsdsAnswerGenerationTest 引用校验：只用被引块、越界作废、拒答判定
+                            MsdsGenerationEvalTest 真实生成模型 E9（默认跳过，需 Ollama + 生成端点）
+                            ai/OpenAiChatAnswerClientTest 本地假服务验证请求体、5 条上限、截断、独立端点与错误映射
 ```
 
-MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设计.md](docs/msds-rag-设计.md)。
+MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设计.md](docs/msds-rag-设计.md)；
+架构取舍与「什么条件下会改主意」见 [docs/架构决策.md](docs/架构决策.md)；
+实验数字与复现命令见 [docs/实验记录.md](docs/实验记录.md)。
 
 ---
 
@@ -479,6 +558,11 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
   的连续跟踪，也不支持一瓶同时用于多个实验的用量分摊。
 - 对账是**手动调用的查询接口**，没有定时巡检与告警：账不平不会主动通知，得有人去看。
   真实系统应该定时跑全量对账并在 `consistent=false` 时报警。
+- 禁忌混放的关系表目前只有 51 对，全部来自仓库内 18 份 MSDS 第 10 节，**没有按 GB 15603
+  建完整关系**；换一批试剂需要重新导入。`uncovered` 是「没有依据」而不是「安全」，
+  不能把接口返回的空冲突列表当成全库安全结论。混放检查已按批次 `location` 判断同柜，
+  但柜位没有主数据、是自由文本，拼写不一致会漏报；也不区分柜内层板与同房间不同柜。
+  检查是即刻快照，没有历史轨迹与定时巡检。
 - 没有定时任务：效期预警是查询时算的，真实系统应该有定时扫描 + 通知；盘点提醒同样没有。
 - 过载保护只在单实例内生效：登录失败计数与检索许可都在进程内存里，多副本各算各的；
   容量参数（连接池 10 / 等 3 秒、语句超时 5 秒、检索 4 个许可）是按小规模估的初值，
@@ -493,11 +577,37 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
   或手工补一条 baseline 记录。本地 H2 是内存库，每次启动都是新库，不受影响。
 - 迁移脚本只使用 H2 与 MySQL 8 都支持的语法，但 H2 毕竟不是 MySQL：字符集、排序规则、
   锁行为仍有差异。涉及这些语义的改动要在真实 MySQL 上再跑一遍，不能只信 H2 测试。
-- MSDS 检索已接入向量路与 RRF 融合（24 题题集：字面 17/20、向量 6/20、融合 18/20），
-  但默认没有云端 key，向量路是本地哈希，**不具备语义泛化能力**（「酸溅到眼睛里」仍漏召回）。
-  融合权重 3:1 是在本地哈希下标定的，接入云端 embedding 后必须重跑评测并重新标定。
+- MSDS 检索已接入向量路与 RRF 融合（24 题题集：字面 17/20、向量 6/20、融合 18/20）。
+  **Hit@5 不等于首条精度**：融合的 Hit@1 只有 6/20，低于纯字面的 11/20，MRR 0.512 也低于 0.687——
+  3:1 权重是用召回换掉了首条排序，这是 WIP，不是完成态。指标与机制见
+  [docs/实验记录.md](docs/实验记录.md) §1.3。
+- 默认没有云端 key，向量路是本地哈希，**不具备语义泛化能力**（「酸溅到眼睛里」仍漏召回）。
+  E4 已在本机实测 bge-m3（RTX 3060 Laptop 6GB，2026-11-05）：纯向量 Hit@5 20/20、Hit@1 14/20，
+  明显优于 local-hash 的 7/20 与 2/20。但**不能把 3:1 直接带过去**——bge-m3 下 3:1 反而把融合
+  Hit@5 从 20/20 压到 18/20，最优是 1:2（20/20、MRR 0.867）。代码已按模型自动分档：
+  local-hash 走 3:1，语义模型走 1:2，切模型不需要手工改权重；默认配置仍是 local-hash，
+  切换后要重跑评测刷新数字。数字与命令见 [docs/实验记录.md](docs/实验记录.md) §1.5，
+  理由见 [docs/架构决策.md](docs/架构决策.md) D3/D9。
   `min-score` 目前为 0.0，原因同样是本地哈希的相关分与无关分区间重叠。
-  生成回答在后续阶段接入，设计见 [docs/msds-rag-设计.md](docs/msds-rag-设计.md)。
+- `/ask` 的生成路径已实现并有引用校验，默认 `hazmat.ai.chat-enabled=false`。
+  已跑过真实生成模型的端到端评测（E9，2026-11-06）：本机 bge-m3 检索 + 在线 DeepSeek 生成，
+  20 道可答题「可答 20/20、生成 18~20/20、引用命中标准节 19~20/20、生成无引用 0」
+  （同一配置三轮的波动范围）；4 道陷阱中 2 道明确拒答、2 道给出有原文依据的否定；
+  另加 24 道库外问题，24/24 明确拒答。20 条完整回答逐条对照块原文，未发现不忠实陈述。
+  **边界仍然要说清**：忠实度是单人抽检、未查遗漏，不是独立评审；库外拒答率只对
+  这 24 道题成立。默认的本地 3B（`qwen2.5:3b`）同题集只有可答 13/20、引用命中
+  标准节 10/20，还会把无关问题硬答，**不能当默认生成路径**——这也是
+  `chat-enabled=false` 至今未改的原因。数字与方法见
+  [docs/实验记录.md](docs/实验记录.md) §1.6。
+  意图章节映射（误食→§4、泄漏→§6……）按 MSDS 的 16 节结构写死，
+  接入国标、SOP 等其它知识源时要按 `doc_type` 另配，不能直接复用章节号。
+  这些是阶段 4 的完成边界，设计见 [docs/msds-rag-设计.md](docs/msds-rag-设计.md) §6。
+- pgvector 规模实验（E5/E6，`tools/bench/pgvector_bench.py`，1024 维合成向量）：
+  1 万块全表扫描 24 ms、HNSW 1.1 ms，但它只召回 0.890；10 万块全表 320 ms、HNSW 3.1 ms，
+  召回掉到 0.530，`ef_search` 拉到 400 才 0.815、`m` 加到 32 也只有 0.736。
+  **瓶颈是召回不是延迟**；索引约 8 KB/块（10 万块 781 MB，且 m=8/16/32 实测同体积，
+  体积由 1024 维向量副本主导）。当前 288 块继续用全表扫描，阶段 2 上量后必须用真实
+  bge-m3 向量重测再定参数。数字与命令见 [docs/实验记录.md](docs/实验记录.md) §1.7。
 - MSDS 文本由 PubChem 公开安全数据整理，仅用于演示，不构成实际安全操作依据；
   真实系统要接供应商提供的正式 SDS。默认不调用云端模型，开启后正文会发送到第三方服务。
 - `/api/msds/reindex` 与 `/api/msds/status` 现在限 ADMIN。它们仍建议放在网关或内网之后：
