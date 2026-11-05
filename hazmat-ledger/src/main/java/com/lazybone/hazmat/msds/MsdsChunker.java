@@ -41,6 +41,21 @@ public final class MsdsChunker {
     }
 
     public static List<Chunk> split(String markdown) {
+        return split(markdown, MAX_CHARS);
+    }
+
+    /**
+     * 指定单块上限的切分，只给对照实验（{@link #MAX_CHARS} 200/400/800 扫描）用。
+     *
+     * 生产路径固定走 {@link #split(String)}：这个重载不参与配置，
+     * 也不会改变 {@link #CHUNK_VERSION}。真要把上限做成可配置项时，
+     * 必须把上限写进四元组或升版本——否则同一份文本在不同上限下
+     * 会生成不同的块与 hash，旧向量却没有失效。
+     */
+    public static List<Chunk> split(String markdown, int maxChars) {
+        if (maxChars <= 0) {
+            throw new IllegalArgumentException("maxChars 必须为正数: " + maxChars);
+        }
         List<Chunk> chunks = new ArrayList<>();
         int sectionNo = -1;
         String sectionTitle = null;

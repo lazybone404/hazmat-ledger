@@ -54,8 +54,54 @@ public class AiProperties {
     /** 单块累计失败多少次后不再重试。持久化在块上，重启后仍然生效 */
     private int maxFailuresPerChunk = 3;
 
+    /**
+     * 是否启用 {@code /ask} 的生成式回答。默认关闭：
+     * 关闭时不调用任何生成模型，直接把检索到的 MSDS 原文片段作为答案返回。
+     * 它与 {@link #enabled} 分开，是因为「算向量」和「把正文发给生成模型」
+     * 是两种不同的数据出境行为，不能用一个开关顺带打开。
+     */
+    private boolean chatEnabled = false;
+
+    /**
+     * 生成模型独立端点。为空时回落到 {@link #baseUrl}，同家服务不用重复配。
+     *
+     * 拆开的原因是 embedding 与生成不一定同源：本机 Ollama 算向量、
+     * 在线 API 做生成是很常见的组合，而 DeepSeek 这类服务根本没有 embeddings 接口。
+     */
+    private String chatBaseUrl = "";
+
+    /** 生成模型独立 key。为空时回落到 {@link #apiKey} */
+    private String chatApiKey = "";
+
+    /** 生成模型名。指向 Ollama 时填本地模型名，如 qwen2.5:3b */
+    private String chatModel = "qwen2.5-3b-instruct";
+
+    /** 生成调用超时（毫秒）。生成比 embedding 慢，单独一档，不能复用 3 秒 */
+    private int chatTimeoutMs = 20000;
+
+    /** 生成回答的最大 token 数，防止模型长篇展开 */
+    private int chatMaxTokens = 800;
+
+    /** 生成温度。安全问答要可复现，默认接近贪心 */
+    private double chatTemperature = 0.1;
+
     /** 有 key 且开关打开才走云端 */
     public boolean hasApiKey() {
         return enabled && apiKey != null && !apiKey.isBlank();
+    }
+
+    /** 是否具备生成式回答的条件 */
+    public boolean hasChatModel() {
+        return chatEnabled && chatModel != null && !chatModel.isBlank();
+    }
+
+    /** 生成端点：未单独配置时与 embedding 共用 */
+    public String effectiveChatBaseUrl() {
+        return chatBaseUrl == null || chatBaseUrl.isBlank() ? baseUrl : chatBaseUrl;
+    }
+
+    /** 生成 key：未单独配置时与 embedding 共用 */
+    public String effectiveChatApiKey() {
+        return chatApiKey == null || chatApiKey.isBlank() ? apiKey : chatApiKey;
     }
 }

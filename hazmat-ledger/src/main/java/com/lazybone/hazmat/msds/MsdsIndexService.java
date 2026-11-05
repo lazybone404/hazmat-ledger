@@ -74,11 +74,19 @@ public class MsdsIndexService {
     /**
      * 全量扫描 + 增量落库。事务包住整个重建：中途失败时库里不会留下「删了一半、写了一半」的状态。
      * 锁在事务外层，避免并发重建看到同一份旧快照、各插一份。
+     *
+     * <b>索引必须在事务提交之后构建：</b>{@code TransactionTemplate.execute} 正常返回时提交已完成，
+     * 此时读到的块才真正存在。若在 {@code doRebuild()} 内提前替换 {@code literalIndex}，
+     * 一旦提交失败或回滚，内存索引就会指向一批已回滚的、库里并不存在的块——
+     * 之后所有检索都会从这些「幽灵块」里取结果，直到下一次重建。
+     * 代价是重建末尾多一次全表查询（几百行量级），换来的是索引与库的强一致。
      */
     public RebuildResult rebuild() {
         rebuildLock.lock();
         try {
-            return transactionTemplate.execute(status -> doRebuild());
+            RebuildResult result = transactionTemplate.execute(status -> doRebuild());
+            refreshFromDatabase();
+            return result;
         } finally {
             rebuildLock.unlock();
         }
@@ -101,7 +109,6 @@ public class MsdsIndexService {
                 .collect(Collectors.toMap(Chemical::getCasNo, Chemical::getName, (a, b) -> a));
 
         List<MsdsChunk> current = new ArrayList<>();
-        Map<String, String> namesByCas = new HashMap<>();
         int files = 0;
         int reused = 0;
         int created = 0;
@@ -124,9 +131,6 @@ public class MsdsIndexService {
             files++;
 
             String chemicalName = registryNames.getOrDefault(casNo, extractChemicalName(chunks));
-            if (chemicalName != null) {
-                namesByCas.put(casNo, chemicalName);
-            }
             for (MsdsChunker.Chunk parsed : chunks) {
                 // 块前挂上化学品名：第 4 节「急救措施」正文里通常不出现「甲醇」二字，
                 // 不挂名字的话，问「甲醇误食」时这一块只能靠运气被向量路捞回来
@@ -168,7 +172,6 @@ public class MsdsIndexService {
         }
 
         List<MsdsChunk> saved = chunkRepository.saveAll(current);
-        literalIndex = MsdsLiteralIndex.build(saved, namesByCas);
 
         RebuildResult result = new RebuildResult(files, saved.size(), reused, created, stale.size());
         log.info("MSDS 索引重建完成: {}", result);
@@ -192,6 +195,16 @@ public class MsdsIndexService {
 
     public MsdsLiteralIndex literalIndex() {
         return literalIndex;
+    }
+
+    /**
+     * 该试剂是否已索引任何 MSDS 块。
+     *
+     * 调用方用它区分「库里没有这份 MSDS」与「这次查询只是没命中」：
+     * 前者应明确告诉用户没有资料，后者才该返回空结果或降级提示。
+     */
+    public boolean hasChunksFor(String casNo) {
+        return literalIndex.containsChemical(casNo);
     }
 
     private List<Resource> msdsResources() {

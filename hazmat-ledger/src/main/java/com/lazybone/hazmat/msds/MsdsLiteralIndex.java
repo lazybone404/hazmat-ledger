@@ -9,6 +9,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 字面检索：内存倒排索引，按 IDF 加权打分。
@@ -32,21 +33,25 @@ public final class MsdsLiteralIndex {
     private final Map<String, Double> idf;
     private final List<Map<String, Integer>> termFreqs;
     private final Map<String, String> namesByCas;
+    /** 已索引的试剂 CAS 集合。用于区分「库里没有这份 MSDS」与「这次查询只是没命中」 */
+    private final Set<String> indexedCasNos;
 
     private MsdsLiteralIndex(List<MsdsChunk> chunks,
                              Map<String, Set<Integer>> postings,
                              Map<String, Double> idf,
                              List<Map<String, Integer>> termFreqs,
-                             Map<String, String> namesByCas) {
+                             Map<String, String> namesByCas,
+                             Set<String> indexedCasNos) {
         this.chunks = chunks;
         this.postings = postings;
         this.idf = idf;
         this.termFreqs = termFreqs;
         this.namesByCas = namesByCas;
+        this.indexedCasNos = indexedCasNos;
     }
 
     public static MsdsLiteralIndex empty() {
-        return new MsdsLiteralIndex(List.of(), Map.of(), Map.of(), List.of(), Map.of());
+        return new MsdsLiteralIndex(List.of(), Map.of(), Map.of(), List.of(), Map.of(), Set.of());
     }
 
     public static MsdsLiteralIndex build(List<MsdsChunk> chunks) {
@@ -88,7 +93,25 @@ public final class MsdsLiteralIndex {
             // 平滑 IDF：token 出现在所有块里时权重趋近 0，这正是单字该有的待遇
             idf.put(entry.getKey(), Math.log((n + 1.0) / (entry.getValue().size() + 0.5)));
         }
-        return new MsdsLiteralIndex(snapshot, postings, idf, termFreqs, Map.copyOf(namesByCas));
+        Set<String> casNos = snapshot.stream()
+                .map(MsdsChunk::getCasNo)
+                .collect(Collectors.toUnmodifiableSet());
+        return new MsdsLiteralIndex(snapshot, postings, idf, termFreqs, Map.copyOf(namesByCas), casNos);
+    }
+
+    /** 该试剂是否已索引任何块。注意：不等于「本次查询有命中」，两者要分开判断 */
+    public boolean containsChemical(String casNo) {
+        return casNo != null && indexedCasNos.contains(casNo);
+    }
+
+    /**
+     * 索引时记录的试剂名：档案里有就用档案名，没有就从文档第 1 节取。
+     *
+     * 检索结果返回 CAS 号替名（「67-56-1 第 4 节」）对用户没有意义；
+     * 档案缺位时仍应显示文档自带的名字。
+     */
+    public String nameOf(String casNo) {
+        return casNo == null ? null : namesByCas.get(casNo);
     }
 
     public record Hit(MsdsChunk chunk, double score) {

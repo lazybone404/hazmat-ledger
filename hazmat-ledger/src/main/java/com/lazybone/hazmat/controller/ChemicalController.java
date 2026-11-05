@@ -4,8 +4,10 @@ import com.lazybone.hazmat.common.ApiResponse;
 import com.lazybone.hazmat.common.PageQuery;
 import com.lazybone.hazmat.common.PageResponse;
 import com.lazybone.hazmat.dto.BatchResponse;
+import com.lazybone.hazmat.dto.ChemicalIncompatibilityView;
 import com.lazybone.hazmat.dto.ChemicalRequest;
 import com.lazybone.hazmat.dto.ChemicalResponse;
+import com.lazybone.hazmat.dto.ChemicalSafetyView;
 import com.lazybone.hazmat.dto.ExpiringBatchResponse;
 import com.lazybone.hazmat.dto.InboundRequest;
 import com.lazybone.hazmat.dto.LedgerResponse;
@@ -13,7 +15,9 @@ import com.lazybone.hazmat.dto.ReconcileView;
 import com.lazybone.hazmat.dto.ScrapRequest;
 import com.lazybone.hazmat.dto.ScrapResult;
 import com.lazybone.hazmat.dto.StockView;
+import com.lazybone.hazmat.service.ChemicalSafetyService;
 import com.lazybone.hazmat.service.ChemicalService;
+import com.lazybone.hazmat.service.IncompatibilityService;
 import com.lazybone.hazmat.service.StockService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
@@ -62,11 +66,57 @@ public class ChemicalController {
             Set.of("id", "createdAt", "quantity", "changeType");
 
     private final ChemicalService chemicalService;
+    private final ChemicalSafetyService chemicalSafetyService;
+    private final IncompatibilityService incompatibilityService;
     private final StockService stockService;
 
-    public ChemicalController(ChemicalService chemicalService, StockService stockService) {
+    public ChemicalController(ChemicalService chemicalService,
+                              ChemicalSafetyService chemicalSafetyService,
+                              IncompatibilityService incompatibilityService,
+                              StockService stockService) {
         this.chemicalService = chemicalService;
+        this.chemicalSafetyService = chemicalSafetyService;
+        this.incompatibilityService = incompatibilityService;
         this.stockService = stockService;
+    }
+
+    /**
+     * 试剂详情。列表里只有摘要字段，详情页需要按 id 取完整档案。
+     *
+     * 读接口只要求登录：库存与安全信息对实验室内所有人可见；
+     * 建档与出入库等写操作才限 ADMIN。
+     */
+    @GetMapping("/{id}")
+    public ApiResponse<ChemicalResponse> detail(@Positive @PathVariable Long id) {
+        return ApiResponse.ok(ChemicalResponse.from(chemicalService.findById(id)));
+    }
+
+    /**
+     * 安全信息入口：按试剂的 CAS 号限定检索 MSDS，前端不需要手输试剂名。
+     *
+     * {@code q} 必填，通常由前端用试剂名加动作词预填（如「甲醇 急救」「甲醇 误食」）。
+     * 该试剂没有索引过 MSDS 时返回 {@code available=false} 与明确提示，
+     * 而不是空列表——「没有资料」与「这次没查到」必须让用户分得清。
+     */
+    @GetMapping("/{id}/safety")
+    public ApiResponse<ChemicalSafetyView> safety(
+            @Positive @PathVariable Long id,
+            @Size(max = 200) @RequestParam("q") String q,
+            @Min(1) @Max(20) @RequestParam(defaultValue = "5") int topK) {
+        return ApiResponse.ok(chemicalSafetyService.safety(id, q, topK));
+    }
+
+    /**
+     * 某试剂与其它在库试剂的禁忌混放检查。
+     *
+     * 该试剂当前没有库存时返回 {@code inStock=false} 与说明，而不是把它
+     * 和所有档案两两比对——混放是物理存放问题，不占柜子的试剂不该产生冲突提示。
+     * {@code uncovered} 是「规则表没有记录」的搭档，不代表可以混放。
+     */
+    @GetMapping("/{id}/incompatibilities")
+    public ApiResponse<ChemicalIncompatibilityView> incompatibilities(
+            @Positive @PathVariable Long id) {
+        return ApiResponse.ok(incompatibilityService.checkChemical(id));
     }
 
     @PostMapping

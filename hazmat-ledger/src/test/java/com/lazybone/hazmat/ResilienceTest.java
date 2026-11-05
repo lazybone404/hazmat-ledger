@@ -155,15 +155,19 @@ class ResilienceTest {
     }
 
     @Test
-    @DisplayName("检索许可被占满时返回降级结果，而不是排队或抛异常")
-    void searchDegradesWhenPermitsExhausted() {
+    @DisplayName("向量路许可被占满时仍返回字面结果，只是标记降级")
+    void searchDegradesToLiteralWhenPermitsExhausted() {
         assertThat(limiter.tryAcquire()).as("测试前置：先占满唯一的许可").isTrue();
         try {
-            MsdsSearchResult result = searchService.search("甲醇误食怎么办", null, 5);
+            MsdsSearchResult result = searchService.search("甲醇 误食", null, 5);
 
             assertThat(result.degraded()).isTrue();
-            assertThat(result.degradedReason()).contains("并发已满");
-            assertThat(result.hits()).isEmpty();
+            assertThat(result.degradedReason()).contains("并发已满").contains("字面");
+            assertThat(result.hits())
+                    .as("并发满只该牺牲向量路，不能把整个检索变成空白")
+                    .isNotEmpty();
+            assertThat(result.hits()).allSatisfy(hit ->
+                    assertThat(hit.sources()).containsExactly("literal"));
         } finally {
             limiter.release();
         }

@@ -106,6 +106,17 @@ public class MsdsVectorService {
         return properties.hasApiKey() ? remoteClient : localClient;
     }
 
+    /**
+     * 当前向量路是不是语义模型。融合权重按它分档：
+     * 本地哈希只是字面重合，向量路弱，用 3:1；语义模型下向量路更强，用 1:2。
+     *
+     * 注意判的是「客户端类型」而不是模型名：模型名可以配成任意字符串，
+     * 只有 {@link HashingEmbeddingClient} 是确定无外部调用的兜底档。
+     */
+    public boolean usesSemanticEmbedding() {
+        return !(activeClient() instanceof HashingEmbeddingClient);
+    }
+
     public MsdsVectorIndex vectorIndex() {
         return vectorIndex;
     }

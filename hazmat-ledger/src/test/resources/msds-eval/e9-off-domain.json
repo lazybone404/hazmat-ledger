@@ -1,0 +1,30 @@
+{
+  "questions": [
+    { "id": "o1", "type": "off-domain", "query": "实验室经费怎么申请", "answers": [] },
+    { "id": "o2", "type": "off-domain", "query": "帮我写一篇毕业论文的摘要", "answers": [] },
+    { "id": "o3", "type": "off-domain", "query": "明天上海会下雨吗", "answers": [] },
+    { "id": "o4", "type": "off-domain", "query": "实验室附近的餐厅推荐", "answers": [] },
+    { "id": "o5", "type": "off-domain", "query": "股票明天会涨吗", "answers": [] },
+    { "id": "o6", "type": "off-domain", "query": "怎么申请国家自然科学基金", "answers": [] },
+    { "id": "o7", "type": "off-domain", "query": "帮我把这段话翻译成英文", "answers": [] },
+    { "id": "o8", "type": "off-domain", "query": "推荐几本有机化学教材", "answers": [] },
+
+    { "id": "r1", "type": "off-domain", "query": "乙腈的闪点是多少", "answers": [] },
+    { "id": "r2", "type": "off-domain", "query": "氢化钠应该如何储存", "answers": [] },
+    { "id": "r3", "type": "off-domain", "query": "四氢呋喃着火用什么灭火剂", "answers": [] },
+    { "id": "r4", "type": "off-domain", "query": "苯的致癌性如何", "answers": [] },
+    { "id": "r5", "type": "off-domain", "query": "吡啶的闪点是多少", "answers": [] },
+    { "id": "r6", "type": "off-domain", "query": "氯酸钾应该怎么储存", "answers": [] },
+    { "id": "r7", "type": "off-domain", "query": "液溴泄漏怎么处理", "answers": [] },
+    { "id": "r8", "type": "off-domain", "query": "硫代硫酸钠的毒性如何", "answers": [] },
+
+    { "id": "g1", "type": "off-domain", "query": "甲醇的口服 LD50 具体数值是多少", "answers": [] },
+    { "id": "g2", "type": "off-domain", "query": "乙醇的供应商联系电话是多少", "answers": [] },
+    { "id": "g3", "type": "off-domain", "query": "丙酮的采购价格是多少", "answers": [] },
+    { "id": "g4", "type": "off-domain", "query": "硫酸今年一共采购了多少吨", "answers": [] },
+    { "id": "g5", "type": "off-domain", "query": "氢氧化钠的运输车辆车牌号是多少", "answers": [] },
+    { "id": "g6", "type": "off-domain", "query": "甲苯的供应商资质文件放在哪里", "answers": [] },
+    { "id": "g7", "type": "off-domain", "query": "过氧化氢现在还剩多少库存", "answers": [] },
+    { "id": "g8", "type": "off-domain", "query": "乙酸乙酯的供应商地址", "answers": [] }
+  ]
+}

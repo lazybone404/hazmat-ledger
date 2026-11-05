@@ -191,6 +191,13 @@
         "location": "易制爆专柜 C-2",
         "inboundDaysAgo": 131,
         "expireInDays": 263
+      },
+      {
+        "batchNo": "HP-2026-07",
+        "quantity": 500,
+        "location": "易制爆专柜 C-1",
+        "inboundDaysAgo": 60,
+        "expireInDays": 300
       }
     ]
   },
