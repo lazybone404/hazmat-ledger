@@ -31,3 +31,9 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### 本地工具与缓存 ###
+# CodeGraph 索引由本机生成，不同机器重建即可
+.codegraph/
+__pycache__/
+*.pyc
