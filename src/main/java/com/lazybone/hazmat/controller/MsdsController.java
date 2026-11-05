@@ -1,9 +1,11 @@
 package com.lazybone.hazmat.controller;
 
 import com.lazybone.hazmat.common.ApiResponse;
+import com.lazybone.hazmat.dto.MsdsAnswer;
 import com.lazybone.hazmat.dto.MsdsIndexStatus;
 import com.lazybone.hazmat.dto.MsdsReindexResult;
 import com.lazybone.hazmat.dto.MsdsSearchResult;
+import com.lazybone.hazmat.msds.MsdsAnswerService;
 import com.lazybone.hazmat.msds.MsdsIndexService;
 import com.lazybone.hazmat.msds.MsdsSearchService;
 import com.lazybone.hazmat.msds.MsdsVectorService;
@@ -15,21 +17,26 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * MSDS 安全问答。当前提供检索原文与手动重建索引，
- * 生成式回答（带引用的自然语言答复）在后续阶段接入 {@code /ask}。
+ * MSDS 安全问答：检索原文、生成带引用的回答、手动重建索引。
+ *
+ * 生成不可用时 {@code /ask} 仍返回检索片段（{@code generated=false}），
+ * 不会把「没配模型」变成接口错误。
  */
 @RestController
 @RequestMapping("/api/msds")
 public class MsdsController {
 
     private final MsdsSearchService searchService;
+    private final MsdsAnswerService answerService;
     private final MsdsIndexService indexService;
     private final MsdsVectorService vectorService;
 
     public MsdsController(MsdsSearchService searchService,
+                          MsdsAnswerService answerService,
                           MsdsIndexService indexService,
                           MsdsVectorService vectorService) {
         this.searchService = searchService;
+        this.answerService = answerService;
         this.indexService = indexService;
         this.vectorService = vectorService;
     }
@@ -46,6 +53,23 @@ public class MsdsController {
                                                 @RequestParam(value = "casNo", required = false) String casNo,
                                                 @RequestParam(value = "topK", defaultValue = "5") int topK) {
         return ApiResponse.ok(searchService.search(q, casNo, topK));
+    }
+
+    /**
+     * 检索并作答：每条结论带 {@code [n]} 引用，引用列表由后端从检索结果生成。
+     *
+     * 没有配置生成模型或模型调用失败时，退回抽取式原文片段（{@code generated=false}）；
+     * 检索为空或降级到无法确认时返回 {@code answerable=false}，不编造答案。
+     *
+     * @param q     问题，如「甲醇误食怎么办」
+     * @param casNo 可选，限定某一种试剂
+     * @param topK  参与作答的检索条数，默认 5，最多 20
+     */
+    @GetMapping("/ask")
+    public ApiResponse<MsdsAnswer> ask(@RequestParam("q") String q,
+                                       @RequestParam(value = "casNo", required = false) String casNo,
+                                       @RequestParam(value = "topK", defaultValue = "5") int topK) {
+        return ApiResponse.ok(answerService.ask(q, casNo, topK));
     }
 
     /**
