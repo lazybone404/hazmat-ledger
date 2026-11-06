@@ -172,6 +172,22 @@
 			<artifactId>spring-security-test</artifactId>
 			<scope>test</scope>
 		</dependency>
+
+		<!--
+			MySQL 实机集成测试（B5）：只给 *IT 用，mvn test 不会触发。
+			Testcontainers 用来验证 H2 覆盖不到的差异——Flyway V1–V10 在真实 MySQL
+			上的语法、utf8mb4 字符集、大小写/排序规则与 CHECK 约束行为。
+		-->
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>mysql</artifactId>
+			<scope>test</scope>
+		</dependency>
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>junit-jupiter</artifactId>
+			<scope>test</scope>
+		</dependency>
 	</dependencies>
 
 	<build>

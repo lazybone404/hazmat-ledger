@@ -3,6 +3,8 @@ package com.lazybone.hazmat.seed;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lazybone.hazmat.entity.ChemicalIncompatibility;
+import com.lazybone.hazmat.entity.IncompatibilitySourceType;
+import com.lazybone.hazmat.entity.VerificationStatus;
 import com.lazybone.hazmat.repository.ChemicalIncompatibilityRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.ApplicationArguments;
@@ -13,11 +15,10 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 /**
  * 启动时灌入禁忌混放规则。
@@ -65,7 +66,9 @@ public class IncompatibilitySeedRunner implements ApplicationRunner {
             });
             for (SeedRule seed : rules) {
                 ChemicalIncompatibility rule = ChemicalIncompatibility.of(
-                        seed.casA(), seed.casB(), seed.reason(), seed.source());
+                        seed.casA(), seed.casB(), seed.reason(), seed.source(),
+                        sourceType(seed.sourceType()), seed.sourceDoc(), seed.sourceClause(),
+                        seed.sourceExcerpt(), verificationStatus(seed.verificationStatus()));
                 String key = key(rule);
                 if (seeds.putIfAbsent(key, rule) != null) {
                     log.warn("种子文件里存在重复的禁忌对 {}，后一条被忽略", key);
@@ -73,28 +76,60 @@ public class IncompatibilitySeedRunner implements ApplicationRunner {
             }
         }
 
-        Set<String> existing = ruleRepository.findAll().stream()
-                .map(this::key)
-                .collect(Collectors.toSet());
-        List<ChemicalIncompatibility> missing = seeds.entrySet().stream()
-                .filter(entry -> !existing.contains(entry.getKey()))
-                .map(Map.Entry::getValue)
-                .toList();
-
-        if (missing.isEmpty()) {
-            log.info("禁忌关系表已有 {} 条规则，无需灌入", existing.size());
-            return;
+        Map<String, ChemicalIncompatibility> existing = new LinkedHashMap<>();
+        for (ChemicalIncompatibility rule : ruleRepository.findAll()) {
+            existing.put(key(rule), rule);
         }
-        ruleRepository.saveAll(missing);
-        log.info("已灌入 {} 条禁忌关系（文件共 {} 条，已有 {} 条，来自 {}）",
-                missing.size(), seeds.size(), existing.size(), SEED_FILE);
+        List<ChemicalIncompatibility> missing = new ArrayList<>();
+        List<ChemicalIncompatibility> upgraded = new ArrayList<>();
+        for (Map.Entry<String, ChemicalIncompatibility> entry : seeds.entrySet()) {
+            ChemicalIncompatibility current = existing.get(entry.getKey());
+            if (current == null) {
+                missing.add(entry.getValue());
+                continue;
+            }
+            // 旧库升级：V10 之前落库的规则只有 source 一行文本，这里补结构化依据。
+            // applyBasis 只填空字段，不覆盖人工修正
+            ChemicalIncompatibility seed = entry.getValue();
+            current.applyBasis(seed.getSourceType(), seed.getSourceDoc(), seed.getSourceClause(),
+                    seed.getSourceExcerpt(), seed.getVerificationStatus());
+            if (current.getSourceDoc() != null && current.getSourceExcerpt() != null) {
+                upgraded.add(current);
+            }
+        }
+
+        if (!missing.isEmpty()) {
+            ruleRepository.saveAll(missing);
+            log.info("已灌入 {} 条禁忌关系（文件共 {} 条，已有 {} 条，来自 {}）",
+                    missing.size(), seeds.size(), existing.size(), SEED_FILE);
+        } else {
+            log.info("禁忌关系表已有 {} 条规则，无需新增", existing.size());
+        }
+        if (!upgraded.isEmpty()) {
+            ruleRepository.saveAll(upgraded);
+            log.info("已为 {} 条旧规则补齐结构化依据", upgraded.size());
+        }
     }
 
     private String key(ChemicalIncompatibility rule) {
         return rule.getCasA() + '|' + rule.getCasB();
     }
 
+    private static IncompatibilitySourceType sourceType(String value) {
+        return value == null || value.isBlank()
+                ? IncompatibilitySourceType.MSDS
+                : IncompatibilitySourceType.valueOf(value.trim());
+    }
+
+    private static VerificationStatus verificationStatus(String value) {
+        return value == null || value.isBlank()
+                ? VerificationStatus.PENDING
+                : VerificationStatus.valueOf(value.trim());
+    }
+
     /** 种子文件格式。字段名直接用 casA/casB，与数据库列和一方向约定一致 */
-    record SeedRule(String casA, String casB, String reason, String source) {
+    record SeedRule(String casA, String casB, String reason, String source,
+                    String sourceType, String sourceDoc, String sourceClause,
+                    String sourceExcerpt, String verificationStatus) {
     }
 }

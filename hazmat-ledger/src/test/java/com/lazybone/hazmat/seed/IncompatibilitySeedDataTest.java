@@ -43,6 +43,11 @@ class IncompatibilitySeedDataTest {
             assertThat(rule.path("reason").asText()).isNotBlank();
             assertThat(rule.path("source").asText())
                     .as("每条规则都要能追溯到出处").contains("MSDS");
+            assertThat(rule.path("sourceType").asText()).isEqualTo("MSDS");
+            assertThat(rule.path("sourceDoc").asText()).contains(casA).contains(casB);
+            assertThat(rule.path("sourceClause").asText()).contains("第10节");
+            assertThat(rule.path("sourceExcerpt").asText()).contains("禁配物");
+            assertThat(rule.path("verificationStatus").asText()).isEqualTo("VERIFIED");
 
             String key = casA.compareTo(casB) <= 0 ? casA + '|' + casB : casB + '|' + casA;
             assertThat(pairs.add(key)).as("重复的禁忌对: %s", key).isTrue();

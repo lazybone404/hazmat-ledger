@@ -1,6 +1,7 @@
 package com.lazybone.hazmat.service;
 
 import com.lazybone.hazmat.common.BusinessException;
+import com.lazybone.hazmat.common.DocumentNoGenerator;
 import com.lazybone.hazmat.common.ResourceNotFoundException;
 import com.lazybone.hazmat.dto.RequisitionRequest;
 import com.lazybone.hazmat.dto.ReviewRequest;
@@ -14,6 +15,7 @@ import com.lazybone.hazmat.repository.RequisitionRepository;
 import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.persistence.criteria.Predicate;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -25,10 +27,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 /**
@@ -60,8 +60,6 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 public class RequisitionService {
-
-    private static final DateTimeFormatter NO_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd");
 
     /** 审批遇到版本冲突时最多重试几次。冲突意味着「有人比我先动」，重读到最新状态再判一次就行 */
     private static final int REVIEW_MAX_ATTEMPTS = 3;
@@ -108,14 +106,21 @@ public class RequisitionService {
         if (!chemicalRepository.existsById(request.chemicalId())) {
             throw new ResourceNotFoundException("试剂不存在: id=" + request.chemicalId());
         }
-        Requisition r = requisitionRepository.save(Requisition.builder()
-                .reqNo(nextReqNo())
-                .applicant(applicant)
-                .chemicalId(request.chemicalId())
-                .quantity(request.quantity())
-                .purpose(request.purpose())
-                .status(RequisitionStatus.PENDING)
-                .build());
+        Requisition r;
+        try {
+            r = requisitionRepository.saveAndFlush(Requisition.builder()
+                    .reqNo(nextReqNo())
+                    .applicant(applicant)
+                    .chemicalId(request.chemicalId())
+                    .quantity(request.quantity())
+                    .purpose(request.purpose())
+                    .status(RequisitionStatus.PENDING)
+                    .build());
+        } catch (DataIntegrityViolationException e) {
+            // 单号是 32 位随机序号，多实例部署时仍可能撞上唯一索引。
+            // 参数本身没错，是生成空间冲突——给 400 业务提示让前端重提，不要变成 500
+            throw new BusinessException("申请单号生成冲突，请重新提交");
+        }
 
         // 创建也记一条，时间线才是完整的。fromStatus 留空，见实体上的说明
         record(r.getId(), null, RequisitionStatus.PENDING, applicant, "提交领用申请");
@@ -383,15 +388,14 @@ public class RequisitionService {
     }
 
     /**
-     * 申请单号：日期 + 4 位随机。
+     * 申请单号：见 {@link DocumentNoGenerator}。
      *
      * 这里**故意不用「当天流水号自增」**，因为那需要一次「查今天最大号 + 1」，
      * 又是一处并发点，得再加锁或重试。单号只用于人眼识别和口头沟通，
-     * 唯一性由数据库的唯一索引兜底，撞了就靠重试，不需要它连续。
-     * 用随机数换掉一个并发问题，这个取舍要说得出理由。
+     * 不需要连续。但要说明白：唯一性最终仍由数据库唯一索引兜底，
+     * 所以 {@link #submit} 会把唯一约束冲突翻译成 409 而不是放任它变成 500。
      */
     private String nextReqNo() {
-        return "REQ" + LocalDateTime.now().format(NO_FORMAT)
-                + String.format("%04d", ThreadLocalRandom.current().nextInt(10000));
+        return DocumentNoGenerator.next("REQ");
     }
 }

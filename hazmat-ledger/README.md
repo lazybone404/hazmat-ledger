@@ -46,7 +46,8 @@
 ```bash
 export JAVA_HOME="/c/Program Files/Java/jdk-21.0.11"   # 见下方「环境要求」
 ./mvnw spring-boot:run        # 端口 8090，启动后自动灌 18 条试剂档案、21 个批次
-./mvnw test                   # 211 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
+./mvnw test                   # 216 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
+                              # MySQL 实机用例是 *IT（4 个），不参与默认执行，见「连真实 MySQL」
 ```
 
 演示用的固定日期数据里特意留了**已过期**和**临期**两类批次，所以启动后直接就能看到预警。
@@ -78,8 +79,20 @@ java -jar target/hazmat-ledger-0.0.1-SNAPSHOT.jar --spring.profiles.active=mysql
 # 或开发时：./mvnw spring-boot:run -Dspring-boot.run.profiles=mysql
 ```
 
-连接配置在 `src/main/resources/application-mysql.properties`，默认 `root/88888888`（可用 `DB_PASSWORD` 环境变量覆盖），
-表结构由 Flyway 的 `db/migration` 脚本创建。MySQL 下如果不想灌种子数据，加 `--hazmat.seed.enabled=false`。
+连接配置在 `src/main/resources/application-mysql.properties`，全部走环境变量：
+`DB_HOST`（默认 localhost）、`DB_PORT`（3306）、`DB_NAME`（hazmat）、`DB_USERNAME`（root）、
+`DB_PASSWORD`（**无默认值**，仓库里不写口令）。表结构由 Flyway 的 `db/migration` 脚本创建。
+MySQL 下如果不想灌种子数据，加 `--hazmat.seed.enabled=false`。
+
+真实 MySQL 的迁移/约束用例走 Testcontainers（`MySqlMigrationIT`，`*IT` 不在默认 `test` 阶段）：
+
+```bash
+# 需要本机 Docker；Docker 29 的 API 版本高于 docker-java 的默认值，必须带上 -Dapi.version=1.44
+./mvnw -Dapi.version=1.44 -Dtest=MySqlMigrationIT test
+```
+
+它验证 V1–V10 在 MySQL 8.4 上一次跑完、`ddl-auto=validate` 能启动、中文往返不乱码、
+CAS 对的唯一约束与 `CHECK` 都生效、分页与排序结果正确。Docker 版本较低的机器不需要 `api.version`。
 
 ### 生产配置（prod profile）
 
@@ -162,7 +175,7 @@ pgvector 集成测试同样需要这个容器：`HAZMAT_PGVECTOR=true ./mvnw -Dt
 | GET | `/api/chemicals/expiring?withinDays=` | 登录 | 效期预警分页：仍有库存且 `withinDays` 天内到**可用截止日**（含已过期），按 `usableUntil` 升序 |
 | GET | `/api/chemicals/{id}` | 登录 | 试剂详情（列表只有摘要字段，详情页按 id 取完整档案） |
 | GET | `/api/chemicals/{id}/safety?q=&docType=&topK=` | 登录 | **知识库入口**：按该试剂 CAS 限定检索，返回章节号/条款号、原文与降级原因。`docType` 可选 `MSDS`/`GB`/`SOP`。没有索引过该试剂时返回 `available=false` + 明确提示，不返回空列表 |
-| GET | `/api/incompatibilities` | 登录 | **混放检查**：返回 `conflicts`（同柜且禁配）、`separatedConflicts`（禁配但分柜）、`uncovered`（规则表没记录，**不代表安全**）；每条带 `sharedLocations` |
+| GET | `/api/incompatibilities` | 登录 | **混放检查**：返回 `conflicts`（同柜且禁配）、`separatedConflicts`（禁配但分柜）、`uncovered`（规则表没记录，**不代表安全**）；每条带 `sharedLocations` 与 `basis`（依据类型/文档/条款/原文摘录/核验状态），另给 `basisCoverage` 统计有据、待核、无依据三态 |
 | GET | `/api/chemicals/{id}/incompatibilities` | 登录 | 单个试剂的混放检查，含 `locations`、同柜/分柜冲突与未覆盖搭档；无库存时返回 `inStock=false`，不产生虚假冲突 |
 | GET | `/api/chemicals/{id}/ledger?page=&size=&sort=` | 登录 | 某试剂的出入库流水分页，默认按发生时间倒序 |
 | POST | `/api/chemicals/{id}/batches` | ADMIN | 入库，新建批次 |
@@ -327,7 +340,10 @@ UPDATE chemical_batch SET available_quantity = available_quantity - :qty
 - **`BigDecimal` 不用 `double`**：0.001 mL 是日常精度，double 表示不了 0.1，累加几十次就对不上账。
 - **流水表存 `balanceAfter`**：对账从「累加全部历史」变成「比最后一笔」，而且漏记一笔立刻能看出来。
 - **出库按效期升序但不含过期**：按效期是为了减少浪费；过期是报废不是临期，必须过滤掉。
-- **单号用日期 + 随机数**：避开了「查今天最大号 + 1」这个额外并发点，唯一性交给唯一索引兜底。
+- **单号用日期 + 进程内自增序号**（`REQ20261106A1B2C3D4`）：避开了「查今天最大号 + 1」这个额外并发点。
+  最初是 4 位随机数，写路径压测里 734 次并发建单撞了 72 次唯一索引（万分之一空间，生日悖论），
+  每次撞号都是一个 500。改成进程内自增后，单 JVM 内确定性唯一；多实例仍可能撞，唯一约束冲突
+  会翻译成 400 业务错误让调用方重提，而不是 500。理由见 `common/DocumentNoGenerator`。
 
 ### 4.4 （主线一）双人复核：加一个状态，而不是加一个计数
 
@@ -498,6 +514,41 @@ UPDATE chemical_batch SET available_quantity = available_quantity - :qty
 会被当成两个柜，录入不规范会漏报；只判断是否同一柜，不区分柜内层板与隔间，
 同一房间的不同柜也不视为同柜。要做到库房级合规，下一步应把柜位抽成主数据并校验。
 
+### 4.9 （支撑）写路径压测：一次业务动作要发几次请求
+
+读路径压测（§4.1）只回答「单个查询多快」；写路径要回答的是另一件事：**一条业务链路
+要发几次请求、事务与条件更新在并发下值多少延迟**。压测器是
+[`tools/bench/WritePathBench.java`](tools/bench/WritePathBench.java)，JDK 21 虚拟线程，
+直接打 HTTP，不依赖测试框架。
+
+环境：本机 MySQL 8.4 容器 + 应用同机，Hikari 连接池 10，单场景 10 秒。
+
+| 链路 | 并发 | 10 秒完成链路 | 链路 QPS | p50 | p95 | p99 | 状态码 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| 入库（1 请求） | 8 | 2507 | 250.7 | 30.1 ms | 44.4 ms | 65.5 ms | 200×2507 |
+| 领用（提交→审批→出库→核销，4 请求） | 8 | 436 | 43.6 | 183.3 ms | 204.5 ms | 215.2 ms | 200×1744 |
+| 盘点（建单→读明细→逐条录入→提交→确认，5+N 请求） | 1 | 97 | 9.7 | 99.6 ms | 129.4 ms | 152.2 ms | 200×485 |
+| 盘点同上 | 4 | 272 / 498 | 27.2 | 138.5 ms | 159.8 ms | 173.6 ms | 400×226（业务互斥） |
+| 报废超量（事务回滚） | 4 | 4684 | 468.4 | 8.4 ms | 10.5 ms | 12.0 ms | 400×4684（预期拒绝） |
+
+三个结论：
+
+- **出库是领用链的成本中心。** 同样的应用、同样的连接池，试剂只有 1 个批次时链路 p50
+  183 ms；换成被入库压测写进约 5000 个批次的试剂后，p50 涨到 362 ms——`issue` 按效期
+  取出该试剂**全部**可用批次再逐个条件扣减，批次数直接进入单次请求的成本。
+  真实运营要做的是及时归档零余额批次，而不是先给数据库加缓存。
+- **盘点的并发失败是业务规则，不是系统错误。** 同一批次只允许出现在一张未完成盘点单里，
+  4 并发下 226/498 条链路在建单时被 400 拒绝，**没有一条 500**。要测吞吐只能用串行；
+  一次全盘会把「有库存批次数」条明细冻结进单子，批次上千时链路本身就不适合高并发。
+- **回滚路径要选对入口。** 最初用「领用量大于库存」测回滚，结果是 0 次拒绝：`issue` 的语义是
+  **部分出库**，超量申请会成功发出剩余量。改用「报废量大于批次余量」触发条件扣减失败，
+  才真的走到事务回滚，p99 12 ms、零 5xx。
+
+压测还顺带查出两个真实缺陷，都已修：4 位随机单号在并发下撞唯一索引变成 500（改为进程内
+自增 + 冲突翻译成 400 业务错误，见 §4.3）；数量超过 `DECIMAL(12,3)` 上限时数据库截断报错变成 500
+（四个数量入口补 `@DecimalMax`，返回 400）。数字与局限见
+[docs/实验记录.md](docs/实验记录.md) §1.9。
+
 ---
 
 ## 5. 代码结构
@@ -537,9 +588,12 @@ src/main/java/com/lazybone/hazmat/
 
 src/main/java/com/lazybone/hazmat/bench/
                      BenchDataLoader 压测数据装载（默认关闭，--hazmat.bench.enabled=true 才执行）
-tools/bench/         run-read.sh 读路径压测编排；压测器本体 Bench 只依赖 JDK 21 虚拟线程
+tools/bench/         run-read.sh 读路径压测编排；Bench 读路径、WritePathBench 写链路（只依赖 JDK 21 虚拟线程）
+                     pgvector_bench.py 向量规模与 HNSW 参数实验
 
-src/main/resources/db/migration/   V1 表结构、V2 分页复合索引、V3 盘点表、V4 开封字段、V5 批次号唯一索引、V6 禁忌关系表；Hibernate 只做 validate，不再自动建表
+src/main/resources/db/migration/   V1 表结构、V2 分页复合索引、V3 盘点表、V4 开封字段、V5 批次号唯一索引、
+                                   V6 禁忌关系表、V7 知识文档与块维度、V8 token 版本、V9 索引版本台账、
+                                   V10 禁忌依据字段；Hibernate 只做 validate，不自动建表
 src/main/resources/mapper/         报表 XML（ReportMapper.xml），只有只读 SELECT
 src/main/resources/msds/           18 份按 GB/T 16483 的 16 节结构整理的演示文本（{casNo}.md）
 src/test/java/com/lazybone/hazmat/
@@ -555,9 +609,12 @@ src/test/java/com/lazybone/hazmat/
 ├── BatchOpeningTest        开封留痕、可用期取 min、重复/并发开封、过期后不再出库、四处口径统一
 ├── ScrapTest               报废闭环：过期批次出口、跨试剂拒绝、30 线程不超扣
 ├── ChemicalSafetyTest      详情接口、安全入口、无 MSDS 的 available=false、401/404/400
-├── IncompatibilityTest     同柜/分柜/未覆盖三分类、多柜位求交集、无规则显式未覆盖、401/404
+├── IncompatibilityTest     同柜/分柜/未覆盖三分类、多柜位求交集、无规则显式未覆盖、依据三态与覆盖率、401/404
 ├── entity/ChemicalIncompatibilityTest  规则对归一化、拒绝自对与空值
-├── seed/IncompatibilitySeedDataTest    种子 CAS 拼写、重复对、出处完整性
+├── seed/IncompatibilitySeedDataTest    种子 CAS 拼写、重复对、出处完整性、依据字段
+├── QuantityRangeTest       四个数量入口超过 DECIMAL(12,3) 上限时被校验挡下（400 而非 500）
+├── common/DocumentNoGeneratorTest  10 万单号并发生成不重复、格式含日期
+├── MySqlMigrationIT        MySQL 8.4 实机：Flyway V1–V10、中文往返、唯一约束与 CHECK、分页（*IT，默认不跑）
 └── msds/                   MsdsChunkerTest 切块 / MsdsSearchTest 检索与增量重建
                             MsdsFusionTest 融合元数据 / MsdsSearchDegradeTest 降级
                             MsdsRetrievalEvalTest 24 题 Hit@5
@@ -603,6 +660,11 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
   不能把接口返回的空冲突列表当成全库安全结论。混放检查已按批次 `location` 判断同柜，
   但柜位没有主数据、是自由文本，拼写不一致会漏报；也不区分柜内层板与同房间不同柜。
   检查是即刻快照，没有历史轨迹与定时巡检。
+- 每条规则的依据已结构化（`basis{type,doc,clause,excerpt,verificationStatus}`），报告给
+  `basisCoverage`；51 对全部回填 MSDS §10 原文，`VERIFIED`。但 `VERIFIED` 的含义只是
+  「引文与仓库内 MSDS 对得上」，**不是第三方合规复核**；GB 15603 条款号一个都没有编——
+  没有授权全文时规则只能标 `PENDING`，宁缺勿造。依据摘录是人工/脚本抽取的短句，可能漏掉
+  同一节里的其它禁配表述，核对时必须回原文。
 - 三类知识源（MSDS / 国标 / SOP）已接通同一套切块与检索链路，但仓库里的国标与 SOP
   是明确标注「演示样例摘录，非标准全文」的改写文本，**不能作为合规依据**；接入真实标准
   需要重新授权语料并复核条款号。
@@ -621,6 +683,13 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
   4 线程并发查询 6098 次，异常 0、空结果 0；这是 H2 单机的小规模数字，不代表 MySQL 或 10 万块。
   `memory` 与 `pgvector` 两种存储都只读 active 版本，回滚后即时生效。
 - 没有定时任务：效期预警是查询时算的，真实系统应该有定时扫描 + 通知；盘点提醒同样没有。
+- 写路径压测只在本机 MySQL 容器上跑了 10 秒单场景（§4.9），没有长稳、没有网络延迟、
+  没有多实例竞争；数字用于比较链路之间的量级，不能直接当生产容量。已知两个规模边界：
+  出库按效期扫描该试剂**全部**可用批次，批次数从个位数涨到约 5000 时会翻倍（p50 183→362 ms）；
+  一次全盘会为每个有库存批次生成一条明细，批次上千时建单与录入都会变重，应改成分批盘。
+- 单号是「日期 + 进程内自增序号」，多实例之间没有协调：两个实例同日理论上可能撞号。
+  唯一索引兜底并把冲突翻译成 400 业务错误（可重提），但这意味着**调用方需要能处理这条
+  业务错误并重试**；要彻底消除应改成数据库序列或号段服务。
 - 过载保护只在单实例内生效：登录失败计数与检索许可都在进程内存里，多副本各算各的；
   容量参数（连接池 10 / 等 3 秒、语句超时 5 秒、检索 4 个许可）是按小规模估的初值，
   没有压测数据支撑，上线后要照实际指标回头调。

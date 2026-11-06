@@ -15,13 +15,17 @@ import java.util.List;
  * <b>{@code sharedLocations} 是这条关系是否真的构成「混放」的判据。</b>
  * 非空表示两种试剂至少有一个共同柜位，是实际混放；为空表示规则命中但当前分开放置，
  * 只应提示「保持分离」，不能报警成同柜违规。
+ *
+ * <p>{@code basis} 是结构化依据；为 {@code null} 表示这条规则还没有可对照的条款/摘录，
+ * 不能当成「已核实」展示。
  */
 public record IncompatibilityView(
         ChemicalRef chemicalA,
         ChemicalRef chemicalB,
         List<String> sharedLocations,
         String reason,
-        String source
+        String source,
+        RuleBasis basis
 ) {
 
     public static IncompatibilityView of(Chemical a, Chemical b,
@@ -29,6 +33,6 @@ public record IncompatibilityView(
                                          ChemicalIncompatibility rule) {
         return new IncompatibilityView(
                 ChemicalRef.from(a), ChemicalRef.from(b), List.copyOf(sharedLocations),
-                rule.getReason(), rule.getSource());
+                rule.getReason(), rule.getSource(), RuleBasis.from(rule));
     }
 }
