@@ -35,7 +35,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>验证四件事：
  * <ol>
- *   <li>Flyway V1–V10 在 MySQL 8.4 上能按顺序执行完，应用能以 {@code ddl-auto=validate} 启动；</li>
+ *   <li>Flyway V1–V11 在 MySQL 8.4 上能按顺序执行完，应用能以 {@code ddl-auto=validate} 启动；</li>
  *   <li>utf8mb4 下中文名称写入/读出不变形；</li>
  *   <li>禁忌关系的 {@code CHECK (cas_a < cas_b)} 与唯一约束在 MySQL 上真的会拦；</li>
  *   <li>分页查询在真实 MySQL 上总数、页大小与排序都正确。</li>
@@ -72,11 +72,12 @@ class MySqlMigrationIT {
     private ChemicalService chemicalService;
 
     @Test
-    void flywayAppliesEveryMigrationAndV10ColumnsExist() {
+    void flywayAppliesEveryMigrationAndV11TableExists() {
         List<String> versions = jdbcTemplate.queryForList(
                 "SELECT version FROM flyway_schema_history WHERE success = 1 ORDER BY installed_rank",
                 String.class);
-        assertThat(versions).containsExactly("1", "2", "3", "4", "5", "6", "7", "8", "9", "10");
+        assertThat(versions).containsExactly(
+                "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
 
         List<String> basisColumns = jdbcTemplate.queryForList(
                 "SELECT column_name FROM information_schema.columns "
@@ -84,6 +85,21 @@ class MySqlMigrationIT {
                 String.class);
         assertThat(basisColumns).contains(
                 "source_type", "source_doc", "source_clause", "source_excerpt", "verification_status");
+
+        // V11：编码任务表与两个查询索引必须真的建出来
+        List<String> taskColumns = jdbcTemplate.queryForList(
+                "SELECT column_name FROM information_schema.columns "
+                        + "WHERE table_schema = DATABASE() AND table_name = 'msds_encode_task'",
+                String.class);
+        assertThat(taskColumns).contains(
+                "id", "index_version", "status", "attempts", "max_attempts",
+                "worker_id", "last_error", "claimed_at", "created_at", "updated_at", "finished_at");
+        List<String> taskIndexes = jdbcTemplate.queryForList(
+                "SELECT DISTINCT index_name FROM information_schema.statistics "
+                        + "WHERE table_schema = DATABASE() AND table_name = 'msds_encode_task'",
+                String.class);
+        assertThat(taskIndexes).contains(
+                "idx_msds_encode_task_status", "idx_msds_encode_task_version");
 
         // 连接级别也确认一次：迁移没有把库降级成 latin1
         String charset = jdbcTemplate.queryForObject(

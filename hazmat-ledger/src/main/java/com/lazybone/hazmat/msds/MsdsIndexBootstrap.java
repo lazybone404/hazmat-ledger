@@ -1,5 +1,7 @@
 package com.lazybone.hazmat.msds;
 
+import com.lazybone.hazmat.msds.ai.AiProperties;
+import com.lazybone.hazmat.msds.mq.EncodeTaskDispatcher;
 import com.lazybone.hazmat.repository.MsdsChunkRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,13 +27,19 @@ public class MsdsIndexBootstrap {
     private final MsdsIndexService indexService;
     private final MsdsVectorService vectorService;
     private final MsdsChunkRepository chunkRepository;
+    private final EncodeTaskDispatcher encodeTaskDispatcher;
+    private final AiProperties aiProperties;
 
     public MsdsIndexBootstrap(MsdsIndexService indexService,
                               MsdsVectorService vectorService,
-                              MsdsChunkRepository chunkRepository) {
+                              MsdsChunkRepository chunkRepository,
+                              EncodeTaskDispatcher encodeTaskDispatcher,
+                              AiProperties aiProperties) {
         this.indexService = indexService;
         this.vectorService = vectorService;
         this.chunkRepository = chunkRepository;
+        this.encodeTaskDispatcher = encodeTaskDispatcher;
+        this.aiProperties = aiProperties;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -46,7 +54,9 @@ public class MsdsIndexBootstrap {
             // 先按库里已有的向量建快照，检索在编码完成前也能用上旧向量；
             // 编码在后台线程里跑，不阻塞启动，结束后会再刷新一次快照
             vectorService.refreshVectorIndex();
-            vectorService.scheduleEncodingOnStartup();
+            if (aiProperties.isEncodeOnStartup()) {
+                encodeTaskDispatcher.requestEncoding(vectorService.activeVersion(), "startup");
+            }
         } catch (RuntimeException e) {
             // 索引失败不应该拖垮整个台账系统：检索退化为空结果，其他功能照常
             log.error("MSDS 索引初始化失败，检索功能将不可用", e);

@@ -271,17 +271,30 @@ public class MsdsVectorService {
     }
 
     /**
-     * 编码待处理块。{@code maxChunks <= 0} 表示不限条数（生产路径）。
-     * 返回后调用方可直接看 {@link #status()} 的进度。
+     * 编码当前 active 版本的待处理块。保留原签名，现有调用与测试不受影响。
      */
     public EncodeResult encodePending(int maxChunks) {
+        return encodePending(activeVersion(), maxChunks);
+    }
+
+    /**
+     * 编码指定索引版本的待处理块。{@code maxChunks <= 0} 表示不限条数。
+     *
+     * <p>MQ 消费端传任务行上的版本。版本与当前 active 不一致时直接返回空结果，
+     * 由消费端把任务标记为跳过：旧任务不能把新版本的块编码一遍，
+     * 也不能在版本切换后继续往旧版本写向量。
+     */
+    public EncodeResult encodePending(String indexVersion, int maxChunks) {
         EmbeddingClient client = activeClient();
         Quad quad = currentQuad(client);
+        if (!Objects.equals(indexVersion, activeVersion())) {
+            return new EncodeResult(0, 0, 0, false, quad.modelId());
+        }
         if (!encoding.compareAndSet(false, true)) {
             return new EncodeResult(0, 0, 0, false, quad.modelId());
         }
         try {
-            List<MsdsChunk> chunks = activeChunks();
+            List<MsdsChunk> chunks = chunksForVersion(indexVersion);
             MsdsIndexMeta meta = ensureMetaForEncoding(chunks, quad);
             if (meta == null) {
                 log.warn("向量编码已停用：{}", rebuildReason(loadMeta(), quad));
@@ -460,13 +473,6 @@ public class MsdsVectorService {
         });
     }
 
-    /** 启动时自动编码，可在配置里关闭（测试与离线环境不需要它跑） */
-    public void scheduleEncodingOnStartup() {
-        if (properties.isEncodeOnStartup()) {
-            scheduleEncoding();
-        }
-    }
-
     /**
      * 显式重建前的准备：四元组变了就作废全部旧向量；没变就保留，只清失败与暂停。
      *
@@ -631,15 +637,25 @@ public class MsdsVectorService {
         return meta == null ? null : meta.getActiveVersion();
     }
 
+    /** 持久化的暂停原因；MQ 消费端把「暂停」转成 DEAD 时要把它写进任务里 */
+    public String pausedReason() {
+        MsdsIndexMeta meta = loadMeta();
+        return meta == null ? null : meta.getPausedReason();
+    }
+
     /**
      * 当前生效版本的块。所有编码、统计、快照都必须用它，
      * 不能回退到 {@code findAll()}——上一版的行还在库里，全表查会把同一段正文算两次。
      */
     private List<MsdsChunk> activeChunks() {
-        String active = activeVersion();
-        return active == null
+        return chunksForVersion(activeVersion());
+    }
+
+    /** 按版本取块；版本为空时取版本化之前落库的历史块 */
+    private List<MsdsChunk> chunksForVersion(String indexVersion) {
+        return indexVersion == null
                 ? chunkRepository.findByIndexVersionIsNullOrderByCasNoAscSectionNoAscPartNoAsc()
-                : chunkRepository.findByIndexVersionOrderByCasNoAscSectionNoAscPartNoAsc(active);
+                : chunkRepository.findByIndexVersionOrderByCasNoAscSectionNoAscPartNoAsc(indexVersion);
     }
 
     private Quad currentQuad(EmbeddingClient client) {
