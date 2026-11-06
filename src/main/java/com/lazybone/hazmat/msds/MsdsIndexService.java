@@ -1,15 +1,22 @@
 package com.lazybone.hazmat.msds;
 
+import com.lazybone.hazmat.common.BusinessException;
 import com.lazybone.hazmat.entity.Chemical;
 import com.lazybone.hazmat.entity.KnowledgeDocType;
 import com.lazybone.hazmat.entity.KnowledgeDocument;
 import com.lazybone.hazmat.entity.MsdsChunk;
+import com.lazybone.hazmat.entity.MsdsIndexMeta;
+import com.lazybone.hazmat.entity.MsdsIndexVersion;
+import com.lazybone.hazmat.msds.ai.AiProperties;
+import com.lazybone.hazmat.msds.ai.HashingEmbeddingClient;
 import com.lazybone.hazmat.msds.knowledge.ChunkerRegistry;
 import com.lazybone.hazmat.msds.knowledge.DocumentChunker;
 import com.lazybone.hazmat.msds.knowledge.TextChunk;
 import com.lazybone.hazmat.repository.ChemicalRepository;
 import com.lazybone.hazmat.repository.KnowledgeDocumentRepository;
 import com.lazybone.hazmat.repository.MsdsChunkRepository;
+import com.lazybone.hazmat.repository.MsdsIndexMetaRepository;
+import com.lazybone.hazmat.repository.MsdsIndexVersionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.Resource;
@@ -29,6 +36,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -52,10 +60,16 @@ public class MsdsIndexService {
     /** 与 rebuild 里给块加的名称前缀保持一致，从库里恢复索引时靠它取回名称 */
     private static final Pattern SUBJECT_PREFIX = Pattern.compile("^\\[([^\\]]+)] ");
 
+    /** msds_index_meta 固定一行 */
+    private static final int META_ID = 1;
+
     private final MsdsChunkRepository chunkRepository;
     private final ChemicalRepository chemicalRepository;
     private final KnowledgeDocumentRepository documentRepository;
+    private final MsdsIndexMetaRepository metaRepository;
+    private final MsdsIndexVersionRepository versionRepository;
     private final ChunkerRegistry chunkers;
+    private final AiProperties aiProperties;
     private final TransactionTemplate transactionTemplate;
     private final ResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
 
@@ -72,17 +86,34 @@ public class MsdsIndexService {
     public MsdsIndexService(MsdsChunkRepository chunkRepository,
                             ChemicalRepository chemicalRepository,
                             KnowledgeDocumentRepository documentRepository,
+                            MsdsIndexMetaRepository metaRepository,
+                            MsdsIndexVersionRepository versionRepository,
                             ChunkerRegistry chunkers,
+                            AiProperties aiProperties,
                             TransactionTemplate transactionTemplate) {
         this.chunkRepository = chunkRepository;
         this.chemicalRepository = chemicalRepository;
         this.documentRepository = documentRepository;
+        this.metaRepository = metaRepository;
+        this.versionRepository = versionRepository;
         this.chunkers = chunkers;
+        this.aiProperties = aiProperties;
         this.transactionTemplate = transactionTemplate;
     }
 
-    /** 重建结果，直接作为 reindex 接口的返回体 */
-    public record RebuildResult(int files, int chunks, int reused, int created, int deleted) {
+    /**
+     * 重建结果，直接作为 reindex 接口的返回体。
+     *
+     * <p>版本化之后 {@code reused} 的含义从「复用同一行」变成「内容未变、从上一版拷贝向量
+     * 到新版本的新行」；{@code deleted} 是清理掉的「比上一版更老」的块数，
+     * 不是本次重建产生的旧块（上一版会保留一个周期供回滚）。
+     */
+    public record RebuildResult(int files, int chunks, int reused, int created, int deleted,
+                                String version, String previousVersion) {
+    }
+
+    /** 回滚结果：从哪个版本退到哪个版本、当前版本有多少块 */
+    public record RollbackResult(String activeVersion, String previousVersion, int chunks) {
     }
 
     /**
@@ -107,7 +138,18 @@ public class MsdsIndexService {
     }
 
     private RebuildResult doRebuild() {
-        List<MsdsChunk> existing = chunkRepository.findAllByOrderByCasNoAscSectionNoAscPartNoAsc();
+        // 版本化：新版本永远写新行，旧版本保留到下一次重建，供回滚与「编码未完成期间」兜底。
+        // 读旧版本时只读 active；没有 active（升级前的历史数据）才退到 index_version IS NULL。
+        MsdsIndexMeta meta = loadMeta();
+        String previousVersion = meta == null ? null : meta.getActiveVersion();
+        String newVersion = nextVersion();
+        // 只有四元组完全一致时才拷贝旧向量：文字没变不代表向量空间没变，
+        // 换模型后把旧向量带过来，余弦算得出数但排序没有意义
+        boolean copyVectors = vectorQuadMatchesCurrent(meta);
+
+        List<MsdsChunk> existing = previousVersion == null
+                ? chunkRepository.findByIndexVersionIsNullOrderByCasNoAscSectionNoAscPartNoAsc()
+                : chunkRepository.findByIndexVersionOrderByCasNoAscSectionNoAscPartNoAsc(previousVersion);
         Map<String, Deque<MsdsChunk>> reusableByHash = new HashMap<>();
         for (MsdsChunk chunk : existing) {
             reusableByHash.computeIfAbsent(key(chunk.getCasNo(), chunk.getTextHash()), k -> new ArrayDeque<>())
@@ -157,29 +199,28 @@ public class MsdsIndexService {
                 String textHash = MsdsChunker.sha256(content);
 
                 Deque<MsdsChunk> candidates = reusableByHash.get(key(casNo, textHash));
-                MsdsChunk entity = candidates == null ? null : candidates.pollFirst();
-                if (entity != null) {
-                    // 内容没变，只是位置可能挪了：更新位置，保留 vector 和 indexedAt
-                    entity.setSectionNo(parsed.sectionNo());
-                    entity.setSectionTitle(parsed.sectionTitle());
-                    entity.setPartNo(parsed.partNo());
-                    entity.setChemicalId(chemicalIds.get(casNo));
-                    entity.setDocumentId(document.getId());
-                    entity.setDocType(KnowledgeDocType.MSDS.name());
+                MsdsChunk reusable = candidates == null ? null : candidates.pollFirst();
+                if (reusable != null) {
                     reused++;
                 } else {
-                    entity = MsdsChunk.builder()
-                            .casNo(casNo)
-                            .documentId(document.getId())
-                            .docType(KnowledgeDocType.MSDS.name())
-                            .sectionNo(parsed.sectionNo())
-                            .sectionTitle(parsed.sectionTitle())
-                            .partNo(parsed.partNo())
-                            .content(content)
-                            .textHash(textHash)
-                            .chemicalId(chemicalIds.get(casNo))
-                            .build();
                     created++;
+                }
+                MsdsChunk entity = MsdsChunk.builder()
+                        .casNo(casNo)
+                        .documentId(document.getId())
+                        .docType(KnowledgeDocType.MSDS.name())
+                        .sectionNo(parsed.sectionNo())
+                        .sectionTitle(parsed.sectionTitle())
+                        .partNo(parsed.partNo())
+                        .content(content)
+                        .textHash(textHash)
+                        .chemicalId(chemicalIds.get(casNo))
+                        .indexVersion(newVersion)
+                        .build();
+                if (reusable != null && copyVectors) {
+                    // 内容未变且模型未变：拷贝向量，避免为同一段文字再付一次模型调用
+                    entity.setVector(reusable.getVector());
+                    entity.setIndexedAt(reusable.getIndexedAt());
                 }
                 current.add(entity);
             }
@@ -210,52 +251,138 @@ public class MsdsIndexService {
                     String textHash = MsdsChunker.sha256(content);
 
                     Deque<MsdsChunk> candidates = reusableByHash.get(key(sourceCode, textHash));
-                    MsdsChunk entity = candidates == null ? null : candidates.pollFirst();
-                    if (entity != null) {
-                        entity.setDocumentId(document.getId());
-                        entity.setDocType(type.name());
-                        entity.setClauseNo(parsed.clauseNo());
-                        entity.setSectionNo(0);
-                        entity.setSectionTitle(truncateTitle(parsed.sectionTitle()));
-                        entity.setPartNo(partNo++);
-                        entity.setChemicalId(null);
+                    MsdsChunk reusable = candidates == null ? null : candidates.pollFirst();
+                    if (reusable != null) {
                         reused++;
                     } else {
-                        entity = MsdsChunk.builder()
-                                .casNo(sourceCode)
-                                .documentId(document.getId())
-                                .docType(type.name())
-                                .clauseNo(parsed.clauseNo())
-                                .sectionNo(0)
-                                .sectionTitle(truncateTitle(parsed.sectionTitle()))
-                                .partNo(partNo++)
-                                .content(content)
-                                .textHash(textHash)
-                                .build();
                         created++;
+                    }
+                    MsdsChunk entity = MsdsChunk.builder()
+                            .casNo(sourceCode)
+                            .documentId(document.getId())
+                            .docType(type.name())
+                            .clauseNo(parsed.clauseNo())
+                            .sectionNo(0)
+                            .sectionTitle(truncateTitle(parsed.sectionTitle()))
+                            .partNo(partNo++)
+                            .content(content)
+                            .textHash(textHash)
+                            .indexVersion(newVersion)
+                            .build();
+                    if (reusable != null && copyVectors) {
+                        entity.setVector(reusable.getVector());
+                        entity.setIndexedAt(reusable.getIndexedAt());
                     }
                     current.add(entity);
                 }
             }
         }
 
-        List<MsdsChunk> stale = reusableByHash.values().stream()
-                .flatMap(Deque::stream)
+        // 先落新版本，再清理「比上一版更老」的版本：上一版必须留着供回滚。
+        List<MsdsChunk> saved = chunkRepository.saveAll(current);
+
+        List<MsdsChunk> stale = chunkRepository.findAll().stream()
+                .filter(chunk -> !newVersion.equals(chunk.getIndexVersion()))
+                .filter(chunk -> previousVersion == null || !previousVersion.equals(chunk.getIndexVersion()))
                 .toList();
         if (!stale.isEmpty()) {
             chunkRepository.deleteAllInBatch(stale);
         }
 
-        List<MsdsChunk> saved = chunkRepository.saveAll(current);
+        activateVersion(meta, newVersion, previousVersion, saved.size());
 
-        RebuildResult result = new RebuildResult(files, saved.size(), reused, created, stale.size());
+        RebuildResult result = new RebuildResult(files, saved.size(), reused, created, stale.size(),
+                newVersion, previousVersion);
         log.info("MSDS 索引重建完成: {}", result);
         return result;
     }
 
+    /** 切指针 + 写版本台账，全部在重建事务内完成：提交前外部看不到半成品 */
+    private void activateVersion(MsdsIndexMeta meta, String newVersion, String previousVersion, int chunkCount) {
+        LocalDateTime now = LocalDateTime.now();
+        MsdsIndexMeta target = meta == null ? new MsdsIndexMeta() : meta;
+        target.setId(META_ID);
+        target.setActiveVersion(newVersion);
+        target.setPreviousVersion(previousVersion);
+        target.setBuildingVersion(null);
+        target.setSwitchedAt(now);
+        target.setUpdatedAt(now);
+        metaRepository.save(target);
+
+        if (previousVersion != null) {
+            versionRepository.findById(previousVersion).ifPresent(version -> {
+                version.setStatus(MsdsIndexVersion.PREVIOUS);
+                versionRepository.save(version);
+            });
+        }
+        versionRepository.save(MsdsIndexVersion.builder()
+                .version(newVersion)
+                .status(MsdsIndexVersion.ACTIVE)
+                .chunkCount(chunkCount)
+                .createdAt(now)
+                .switchedAt(now)
+                .build());
+        // 台账只保留 active + previous，与块表的保留集一致
+        List<MsdsIndexVersion> retired = versionRepository.findAll().stream()
+                .filter(version -> !version.getVersion().equals(newVersion))
+                .filter(version -> !version.getVersion().equals(previousVersion))
+                .toList();
+        if (!retired.isEmpty()) {
+            versionRepository.deleteAllInBatch(retired);
+        }
+    }
+
+    /**
+     * 回滚到上一版：只交换 active/previous 指针，不动块。
+     *
+     * <p>没有 previous 时报业务错误（首次版本化重建之前没有可回退的版本）。
+     * 与重建共用同一把锁，避免回滚读到正在切换的中间状态。
+     */
+    public RollbackResult rollback() {
+        rebuildLock.lock();
+        try {
+            RollbackResult result = transactionTemplate.execute(status -> doRollback());
+            refreshFromDatabase();
+            return result;
+        } finally {
+            rebuildLock.unlock();
+        }
+    }
+
+    private RollbackResult doRollback() {
+        MsdsIndexMeta meta = loadMeta();
+        if (meta == null || meta.getPreviousVersion() == null || meta.getPreviousVersion().isBlank()) {
+            throw new BusinessException("当前没有可回滚的版本：至少需要一次成功的版本化重建");
+        }
+        String from = meta.getActiveVersion();
+        String to = meta.getPreviousVersion();
+        LocalDateTime now = LocalDateTime.now();
+        meta.setActiveVersion(to);
+        meta.setPreviousVersion(from);
+        meta.setSwitchedAt(now);
+        meta.setUpdatedAt(now);
+        metaRepository.save(meta);
+
+        versionRepository.findById(to).ifPresent(version -> {
+            version.setStatus(MsdsIndexVersion.ACTIVE);
+            version.setSwitchedAt(now);
+            versionRepository.save(version);
+        });
+        if (from != null) {
+            versionRepository.findById(from).ifPresent(version -> {
+                version.setStatus(MsdsIndexVersion.PREVIOUS);
+                versionRepository.save(version);
+            });
+        }
+        List<MsdsChunk> chunks = chunkRepository
+                .findByIndexVersionOrderByCasNoAscSectionNoAscPartNoAsc(to);
+        log.info("索引回滚: {} → {}（{} 块）", from, to, chunks.size());
+        return new RollbackResult(to, from, chunks.size());
+    }
+
     /** 库里有数据但内存索引为空（例如重启后未重建）时，直接从库里恢复索引，不再扫文件 */
     public void refreshFromDatabase() {
-        List<MsdsChunk> chunks = chunkRepository.findAllByOrderByCasNoAscSectionNoAscPartNoAsc();
+        List<MsdsChunk> chunks = activeChunks();
         Map<String, String> namesByCas = new HashMap<>();
         chemicalRepository.findAll()
                 .forEach(chemical -> namesByCas.put(chemical.getCasNo(), chemical.getName()));
@@ -280,6 +407,45 @@ public class MsdsIndexService {
      */
     public boolean hasChunksFor(String casNo) {
         return literalIndex.containsChemical(casNo);
+    }
+
+    /**
+     * 当前生效版本的块。检索、编码、状态统计都走这里；
+     * active 为空时退到 {@code index_version IS NULL}（版本化之前落库的历史数据）。
+     *
+     * <p>这是版本化里最容易漏的一处：任何一次没有按版本过滤的全表查询，
+     * 都会把上一版块也带进结果，表现为同一段正文被召回两次、块数翻倍。
+     */
+    public List<MsdsChunk> activeChunks() {
+        MsdsIndexMeta meta = loadMeta();
+        String active = meta == null ? null : meta.getActiveVersion();
+        return active == null
+                ? chunkRepository.findByIndexVersionIsNullOrderByCasNoAscSectionNoAscPartNoAsc()
+                : chunkRepository.findByIndexVersionOrderByCasNoAscSectionNoAscPartNoAsc(active);
+    }
+
+    private MsdsIndexMeta loadMeta() {
+        return metaRepository.findById(META_ID).orElse(null);
+    }
+
+    /** 版本号带上模型与维度，排查时不用回查元数据；毫秒后缀保证每次重建唯一 */
+    private String nextVersion() {
+        String model = currentModelLabel().replaceAll("[^A-Za-z0-9._-]", "-");
+        return "v" + MsdsChunker.CHUNK_VERSION + "-" + model + "-"
+                + aiProperties.getEmbeddingDimensions() + "-" + System.currentTimeMillis();
+    }
+
+    private String currentModelLabel() {
+        return aiProperties.hasApiKey() ? aiProperties.getEmbeddingModel() : HashingEmbeddingClient.NAME;
+    }
+
+    /** 与 {@link MsdsVectorService} 的四元组判据一致：不一致就不拷贝旧向量 */
+    private boolean vectorQuadMatchesCurrent(MsdsIndexMeta meta) {
+        return meta != null
+                && Objects.equals(meta.getModelId(), currentModelLabel())
+                && Objects.equals(meta.getDimension(), aiProperties.getEmbeddingDimensions())
+                && Objects.equals(meta.getChunkVersion(), MsdsChunker.CHUNK_VERSION)
+                && Objects.equals(meta.getSchemaVersion(), MsdsVectorService.SCHEMA_VERSION);
     }
 
     private List<Resource> msdsResources() {

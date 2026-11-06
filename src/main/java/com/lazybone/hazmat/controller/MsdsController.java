@@ -111,4 +111,19 @@ public class MsdsController {
     public ApiResponse<MsdsVectorService.ReconcileResult> reconcile() {
         return ApiResponse.ok(vectorService.reconcile());
     }
+
+    /**
+     * 回滚到上一版索引：只交换版本指针，不动块数据。
+     *
+     * 上一版是最近一次重建前的 active，保留一个重建周期；没有上一版时返回业务错误。
+     * 限 ADMIN——它会让所有检索立刻切回旧索引。
+     */
+    @PostMapping("/rollback")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ApiResponse<MsdsIndexService.RollbackResult> rollback() {
+        MsdsIndexService.RollbackResult result = indexService.rollback();
+        // 向量快照也要跟着切：内存实现按 active 重建，pg 实现靠版本过滤
+        vectorService.refreshVectorIndex();
+        return ApiResponse.ok(result);
+    }
 }

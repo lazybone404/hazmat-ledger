@@ -50,4 +50,23 @@ public class MsdsIndexMeta {
 
     @Column(name = "paused_reason", length = 255)
     private String pausedReason;
+
+    /**
+     * 当前生效的索引版本。检索与编码都只认这个版本；
+     * 为空表示还没做过版本化重建（升级前的历史数据，块上的版本号也为空）。
+     */
+    @Column(name = "active_version", length = 64)
+    private String activeVersion;
+
+    /** 回滚目标：上一次的 active。只保留一个，更早的版本在重建后清理 */
+    @Column(name = "previous_version", length = 64)
+    private String previousVersion;
+
+    /** 正在构建的版本；当前实现是一次事务内切换，正常流程下为空 */
+    @Column(name = "building_version", length = 64)
+    private String buildingVersion;
+
+    /** 最近一次切换（含回滚）的时间 */
+    @Column(name = "switched_at")
+    private LocalDateTime switchedAt;
 }

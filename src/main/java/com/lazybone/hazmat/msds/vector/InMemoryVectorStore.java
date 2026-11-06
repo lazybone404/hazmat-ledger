@@ -69,8 +69,9 @@ public class InMemoryVectorStore implements VectorStore {
 
     @Override
     public long count(String indexVersion) {
-        // 全部块目前都还没有版本号；按版本计数只在 pgvector 实现里有意义
-        return indexVersion == null || indexVersion.isBlank() ? index.size() : 0;
+        // 内存索引每次只从 active 版本重建，里面本来就只有当前版本；
+        // 传入版本号时不必再筛，否则会永远返回 0
+        return index.size();
     }
 
     @Override

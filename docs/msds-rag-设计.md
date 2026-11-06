@@ -237,6 +237,41 @@ CREATE INDEX ON msds_vector (index_version, doc_type, cas_no);
 - **状态。** `/api/msds/status` 追加 `vectorStore`（memory/pgvector）、`vectorRows`（不可用时 -1）、
   `missingRows`（MySQL 已编码但 pg 缺失的行数，-1 表示对账未执行）。
 
+### 4.7 版本化切换（B4）
+
+目标是重建期间检索不中断，也不能读到「删了一半」的索引。做法是**块带版本、全局只有一个指针**：
+
+```
+index_version = v{chunkVersion}-{modelSafe}-{dim}-{epochMillis}
+                                  ↑ 每次重建唯一，不靠自增，避免多实例/回滚后重号
+```
+
+`msds_index_meta` 只有一行，保存 `active_version` / `previous_version` / `building_version` / `switched_at`；
+`msds_index_version` 台账逐版记录块数、创建/切换/退役时间，状态只有 `ACTIVE` / `PREVIOUS` / `RETIRED`。
+**没有 `BUILDING`**：新版本的块在同一个事务里写完才切指针，外部看不到半成品，台账里也就不需要中间态。
+
+**重建流程**（`MsdsIndexService#doRebuild`，整个事务在 `rebuildLock` 内）：
+
+1. 读当前 active（首次没有指针时读 `index_version IS NULL` 的历史行）；
+2. 为每个文件生成新版本 id，块行全部写新版本；
+3. `textHash` 相同且四元组（模型/维度/切块版本/schema 版本）未变时，从旧版本复制 `vector` 与 `indexed_at`，
+   增量复用不丢；四元组变了则不复制，等重新编码；
+4. 提交后在同一事务边界内切 `active_version`，旧 active 记为 `previous_version`；
+5. 删除既不是新 active、也不是 previous 的块与台账行——**只保留两版**。
+
+**读取规则**：字面索引、待编码块、状态统计、pg 对账全部走 `activeChunks()`；删除「读全部块」的入口，
+这是这套方案最容易漏的地方。`memory` 存储按 active 重建内存快照，`pgvector` 存储用
+`index_version = active` 过滤，两者语义一致。
+
+**回滚**（`POST /api/msds/rollback`，ADMIN）：只交换 active/previous 指针并同步台账状态，不动块数据，
+所以在锁内是瞬时的；没有 previous 时返回业务错误而不是静默成功。代价是只能回退一版。
+
+**边界**：
+
+- 新版本切过去时向量还没编码，这段时间新块只能靠字面路召回；编码完成后向量路才完整。
+- 两版块在库里并存，存储短暂翻倍；块数量级（当前 302）可接受，10 万级需要重新评估保留策略。
+- 回滚不重新编码，切回的旧版本沿用旧向量；若四元组已变，`/status` 仍会提示需要重建。
+
 ## 5. 检索
 
 ```

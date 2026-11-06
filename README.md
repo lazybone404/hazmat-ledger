@@ -46,7 +46,7 @@
 ```bash
 export JAVA_HOME="/c/Program Files/Java/jdk-21.0.11"   # 见下方「环境要求」
 ./mvnw spring-boot:run        # 端口 8090，启动后自动灌 18 条试剂档案、21 个批次
-./mvnw test                   # 209 个测试，不需要任何中间件；E4 对照、E9 生成评测与 pgvector 集成测试需外部服务，默认跳过（8 个）
+./mvnw test                   # 211 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
 ```
 
 演示用的固定日期数据里特意留了**已过期**和**临期**两类批次，所以启动后直接就能看到预警。
@@ -187,8 +187,9 @@ pgvector 集成测试同样需要这个容器：`HAZMAT_PGVECTOR=true ./mvnw -Dt
 | GET | `/api/msds/search?q=&casNo=&docType=&topK=` | 登录 | 检索知识片段（MSDS / 国标 / SOP）。`q` 必填、上限 200 字符，`casNo` 与 `docType` 可选，`topK` 默认 5、上限 20。返回 `MsdsSearchResult`：命中列表（每条带 `sources`、`docType`、`clauseNo`）+ 降级原因 + 索引状态 |
 | GET | `/api/msds/ask?q=&casNo=&topK=` | 登录 | 检索并作答。返回 `MsdsAnswer`：`answerable` / `generated` / `answer` / `citations` / `degraded` / `degradedReason`。引用由后端从命中生成，模型只能选编号（最多前 5 条）；无模型或调用失败退回原文摘录（`generated=false`），无依据时 `answerable=false` |
 | POST | `/api/msds/reindex` | ADMIN | 扫描知识源目录增量落块；四元组变了就作废旧向量，然后在后台开始编码 |
-| GET | `/api/msds/status` | ADMIN | 向量索引状态：进度、暂停原因、当前模型、元数据是否需重建；`vectorStore` / `vectorRows` / `missingRows` 给出存储实现与对账缺口（-1 表示存储不可用或对不了账） |
+| GET | `/api/msds/status` | ADMIN | 向量索引状态：进度、暂停原因、当前模型、元数据是否需重建、`activeVersion` / `previousVersion`；`vectorStore` / `vectorRows` / `missingRows` 给出存储实现与对账缺口（-1 表示存储不可用或对不了账） |
 | POST | `/api/msds/reconcile` | ADMIN | 向量库对账：把「MySQL 已编码、向量库缺失」的行补写回去；幂等，memory 模式直接返回说明 |
+| POST | `/api/msds/rollback` | ADMIN | 回滚到上一版索引：只交换 active/previous 指针，不动块；没有上一版时返回业务错误 |
 | GET | `/api/reports/stock-summary?withinDays=` | 登录 | 库存汇总（MyBatis-Plus）：按分类 + 单位给出试剂数、批次数、总量、临期量与过期量 |
 | GET | `/api/reports/flow-trend?days=` | 登录 | 出入库趋势（MyBatis-Plus）：按自然日 + 变更类型汇总，数量带符号 |
 | GET | `/actuator/health` | 公开 | 探活，返回 `{"status":"UP"}`；`/actuator/health/liveness`、`/actuator/health/readiness` 同样公开 |
@@ -614,6 +615,11 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
   pg 不可用时向量路降级到字面检索，不影响 `answerable` 的字面依据。
   仍缺：真实 bge-m3 向量下的 E5 重测（当前 E5 数字来自 1024 维合成向量），
   以及 pgvector 连接池/超时参数在压测下的标定。
+- 索引已做版本化切换：重建写新版本、只改 active 指针，上一版保留为 previous 供 `POST /api/msds/rollback`；
+  更早的版本在重建事务里清理，所以只能回退一版。重建期间字面路始终完整，但新块的向量要等后台编码，
+  这个窗口内新内容只能靠字面路召回。E8 实测（本机 H2，302 块）：3 次重建各 228~351 ms，
+  4 线程并发查询 6098 次，异常 0、空结果 0；这是 H2 单机的小规模数字，不代表 MySQL 或 10 万块。
+  `memory` 与 `pgvector` 两种存储都只读 active 版本，回滚后即时生效。
 - 没有定时任务：效期预警是查询时算的，真实系统应该有定时扫描 + 通知；盘点提醒同样没有。
 - 过载保护只在单实例内生效：登录失败计数与检索许可都在进程内存里，多副本各算各的；
   容量参数（连接池 10 / 等 3 秒、语句超时 5 秒、检索 4 个许可）是按小规模估的初值，
