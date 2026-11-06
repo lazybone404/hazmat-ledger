@@ -91,4 +91,15 @@ public final class MsdsVectorIndex {
     public boolean isEmpty() {
         return entries.isEmpty();
     }
+
+    /** 索引里有哪些块 id。对账用：与 MySQL 的「已编码」集合比对出缺口 */
+    public java.util.Set<Long> chunkIds() {
+        java.util.Set<Long> ids = new java.util.HashSet<>(entries.size() * 2);
+        for (Entry entry : entries) {
+            if (entry.chunk().getId() != null) {
+                ids.add(entry.chunk().getId());
+            }
+        }
+        return ids;
+    }
 }

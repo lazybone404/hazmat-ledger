@@ -11,6 +11,7 @@ import com.lazybone.hazmat.msds.ai.HttpEmbeddingClient;
 import com.lazybone.hazmat.msds.ai.VectorCodec;
 import com.lazybone.hazmat.msds.vector.ScoredChunk;
 import com.lazybone.hazmat.msds.vector.VectorFilter;
+import com.lazybone.hazmat.msds.vector.VectorRecord;
 import com.lazybone.hazmat.msds.vector.VectorStore;
 import com.lazybone.hazmat.repository.MsdsChunkRepository;
 import com.lazybone.hazmat.repository.MsdsIndexMetaRepository;
@@ -26,7 +27,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.stream.Collectors;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -109,6 +110,14 @@ public class MsdsVectorService {
 
     /** 显式重建时的准备结果：旧向量是否被整体作废、清了多少块 */
     public record ResetResult(boolean vectorsInvalidated, int clearedVectors, String model, String note) {
+    }
+
+    /**
+     * 对账结果。{@code expected} 是 MySQL 里「向量可用」的块数，{@code present} 是其中
+     * 向量库里实际存在的行数，{@code repaired} 是本次补写的行数，{@code missing} 是补写后
+     * 仍然缺的行数（0 表示两边一致）。
+     */
+    public record ReconcileResult(String store, int expected, int present, int repaired, int missing, String note) {
     }
 
     private record Quad(String modelId, int dimension, int chunkVersion, int schemaVersion) {
@@ -313,6 +322,8 @@ public class MsdsVectorService {
                         chunk.setLastError(null);
                     }
                     chunkRepository.saveAll(batch);
+                    // MySQL 已落库再写向量库：顺序反过来的话，写入失败会留下「向量库有、台账没有」的幻影行
+                    syncToVectorStore(batch);
                     encoded += batch.size();
                     consecutiveFailures = 0;
                     meterRegistry.counter("msds.vector.encode", "result", "encoded")
@@ -340,6 +351,100 @@ public class MsdsVectorService {
             // 提前 return（暂停、元数据不符）也要刷新：部分批次可能已经写成功
             refreshVectorIndex();
         }
+    }
+
+    /**
+     * 把刚编码成功的块写进支持增量写入的向量存储。
+     *
+     * <p>失败只记指标和日志，不抛给编码流程：向量库是派生数据，MySQL 已经落库，
+     * 缺口由 {@link #reconcile()} 补。若在这里抛错，一次 pg 抖动就会把整批标记成
+     * 「AI 编码失败」，进而累加失败次数、提前暂停整个编码队列——故障范围被放大。
+     */
+    private void syncToVectorStore(List<MsdsChunk> batch) {
+        if (!vectorStore.supportsIncrementalWrites()) {
+            return;
+        }
+        List<VectorRecord> records = toRecords(batch);
+        if (records.isEmpty()) {
+            return;
+        }
+        try {
+            vectorStore.upsert(records);
+            meterRegistry.counter("msds.vector.store.write", "result", "ok").increment(records.size());
+        } catch (RuntimeException e) {
+            meterRegistry.counter("msds.vector.store.write", "result", "failed").increment(records.size());
+            log.error("向量写入 {} 失败（MySQL 已落库，可用对账补写）: {}", vectorStore.name(), e.getMessage());
+        }
+    }
+
+    /**
+     * 对账：MySQL 认为「已编码」的块，向量库里缺哪些，缺的立即补写。
+     *
+     * <p>触发场景：pg 写入失败、pg 从备份恢复、切换存储后首次启用。
+     * 内存实现每次刷新都从库全量重建，本来就不会缺，直接返回说明。
+     */
+    public ReconcileResult reconcile() {
+        EmbeddingClient client = activeClient();
+        Quad quad = currentQuad(client);
+        List<MsdsChunk> chunks = chunkRepository.findAll();
+        List<MsdsChunk> encoded = chunks.stream()
+                .filter(chunk -> chunk.getId() != null && hasUsableVector(chunk, quad))
+                .toList();
+        if (!vectorStore.supportsIncrementalWrites()) {
+            long rows = vectorStore.count(null);
+            return new ReconcileResult(vectorStore.name(), encoded.size(), (int) Math.max(rows, 0), 0, 0,
+                    "当前存储每次从库全量重建，不存在写入缺口");
+        }
+        List<Long> ids = encoded.stream().map(MsdsChunk::getId).toList();
+        Set<Long> present;
+        try {
+            present = vectorStore.existingIds(ids);
+        } catch (RuntimeException e) {
+            log.warn("向量库对账失败: {}", e.getMessage());
+            return new ReconcileResult(vectorStore.name(), encoded.size(), 0, 0, encoded.size(),
+                    "向量存储不可用，本次对账未执行: " + e.getMessage());
+        }
+        List<MsdsChunk> missing = encoded.stream()
+                .filter(chunk -> !present.contains(chunk.getId()))
+                .toList();
+        int repaired = 0;
+        if (!missing.isEmpty()) {
+            List<VectorRecord> records = toRecords(missing);
+            try {
+                vectorStore.upsert(records);
+                repaired = records.size();
+                meterRegistry.counter("msds.vector.store.reconcile", "result", "repaired")
+                        .increment(repaired);
+                log.info("向量库对账补写 {} 行", repaired);
+            } catch (RuntimeException e) {
+                meterRegistry.counter("msds.vector.store.reconcile", "result", "failed").increment();
+                log.error("向量库对账补写失败: {}", e.getMessage());
+            }
+        }
+        int remaining = missing.size() - repaired;
+        String note = remaining == 0
+                ? (repaired == 0 ? "两边一致，无需补写" : "缺口已补齐")
+                : "仍有 " + remaining + " 行缺失，下一轮重试";
+        return new ReconcileResult(vectorStore.name(), encoded.size(), present.size(), repaired, remaining, note);
+    }
+
+    /** 块实体转存储记录；解码不出来的跳过（调用方已按可用向量筛过） */
+    private static List<VectorRecord> toRecords(List<MsdsChunk> chunks) {
+        List<VectorRecord> records = new ArrayList<>(chunks.size());
+        for (MsdsChunk chunk : chunks) {
+            VectorCodec.Decoded decoded = VectorCodec.decode(chunk.getVector());
+            if (decoded == null || chunk.getId() == null) {
+                continue;
+            }
+            records.add(new VectorRecord(
+                    chunk.getId(),
+                    chunk.getCasNo(),
+                    chunk.getDocType() == null ? "MSDS" : chunk.getDocType(),
+                    chunk.getIndexVersion(),
+                    decoded.model(),
+                    decoded.vector()));
+        }
+        return records;
     }
 
     /** 后台编码。单线程 executor 保证多次触发串行，不会并发写同一批块 */
@@ -431,13 +536,29 @@ public class MsdsVectorService {
         int encoded = 0;
         int failed = 0;
         int pending = 0;
+        List<Long> encodedIds = new ArrayList<>();
         for (MsdsChunk chunk : chunks) {
             if (hasUsableVector(chunk, quad)) {
                 encoded++;
+                if (chunk.getId() != null) {
+                    encodedIds.add(chunk.getId());
+                }
             } else if (chunk.getEncodeFailures() >= properties.getMaxFailuresPerChunk()) {
                 failed++;
             } else {
                 pending++;
+            }
+        }
+
+        // 存储层视图：pg 模式下这就是「派生数据是否追平事实源」的体检结果
+        long vectorRows = vectorStore.count(null);
+        int missingRows = 0;
+        if (!encodedIds.isEmpty() && vectorRows >= 0) {
+            try {
+                missingRows = encodedIds.size() - vectorStore.existingIds(encodedIds).size();
+            } catch (RuntimeException e) {
+                // 对不了账时用 -1 表示「未知」，不能伪装成 0（那等于报告「完全一致」）
+                missingRows = -1;
             }
         }
 
@@ -449,7 +570,8 @@ public class MsdsVectorService {
                 quad.modelId(), quad.dimension(), quad.chunkVersion(), quad.schemaVersion(),
                 metadataReady, needsRebuild,
                 needsRebuild ? rebuildReason(meta, quad) : null,
-                encoding.get());
+                encoding.get(),
+                vectorStore.name(), vectorRows, missingRows);
     }
 
     public boolean isEncoding() {

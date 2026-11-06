@@ -102,6 +102,19 @@
 		</dependency>
 
 		<!--
+			PostgreSQL：pgvector 向量库驱动（B3）。
+
+			只给第二个 DataSource 用，JPA 仍然只连 MySQL——这里不加 JPA 的
+			Postgres 方言，避免 Spring Boot 因为「classpath 里有两个驱动」
+			而改变主数据源的自动配置判断。
+		-->
+		<dependency>
+			<groupId>org.postgresql</groupId>
+			<artifactId>postgresql</artifactId>
+			<scope>runtime</scope>
+		</dependency>
+
+		<!--
 			运行时观测：/actuator/health 供容器与负载均衡探活，/actuator/info 暴露版本，
 			/actuator/prometheus 给指标抓取。env、heapdump 之类默认不暴露，
 			避免把配置和内存内容放出去。

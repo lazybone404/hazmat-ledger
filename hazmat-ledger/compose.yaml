@@ -84,6 +84,10 @@ services:
       HAZMAT_JWT_SECRET: ${HAZMAT_JWT_SECRET:?请先 cp .env.example .env 并设置 HAZMAT_JWT_SECRET}
       HAZMAT_SEED_PASSWORD: ${HAZMAT_SEED_PASSWORD:-ChangeMe123!}
       HAZMAT_VECTOR_STORE: ${HAZMAT_VECTOR_STORE:-memory}
+      # 启用 pgvector profile 时容器内按服务名连；store=memory 时这些值不会被读取
+      HAZMAT_PG_URL: ${HAZMAT_PG_URL:-jdbc:postgresql://pgvector:5432/${PG_VECTOR_DB:-hazmat_vectors}}
+      HAZMAT_PG_USERNAME: ${PG_VECTOR_USER:-hazmat}
+      HAZMAT_PG_PASSWORD: ${PG_VECTOR_PASSWORD:-hazmat-demo-password}
       # 容器日志里不需要每条 SQL
       JPA_SHOW_SQL: "false"
       # 容器内总内存按 limits 的 75% 给堆，和 Dockerfile 的 MaxRAMPercentage 一致

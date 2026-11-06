@@ -53,6 +53,21 @@ public class InMemoryVectorStore implements VectorStore {
     }
 
     @Override
+    public java.util.Set<Long> existingIds(java.util.Collection<Long> chunkIds) {
+        if (chunkIds == null || chunkIds.isEmpty() || index.isEmpty()) {
+            return java.util.Set.of();
+        }
+        java.util.Set<Long> known = index.chunkIds();
+        java.util.Set<Long> found = new java.util.HashSet<>();
+        for (Long id : chunkIds) {
+            if (id != null && known.contains(id)) {
+                found.add(id);
+            }
+        }
+        return found;
+    }
+
+    @Override
     public long count(String indexVersion) {
         // 全部块目前都还没有版本号；按版本计数只在 pgvector 实现里有意义
         return indexVersion == null || indexVersion.isBlank() ? index.size() : 0;
