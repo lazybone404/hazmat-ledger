@@ -56,12 +56,18 @@ public final class MsdsVectorIndex {
      *                 放进融合只会占住名次
      */
     public List<Hit> search(float[] query, String casNo, double minScore) {
+        return searchFiltered(query, SearchFilter.byCasNo(casNo), minScore);
+    }
+
+    /** 带完整过滤条件的检索；名字与 {@link MsdsLiteralIndex#searchFiltered} 保持一致，避免 null 实参歧义 */
+    public List<Hit> searchFiltered(float[] query, SearchFilter filter, double minScore) {
         if (query == null || query.length == 0 || entries.isEmpty()) {
             return List.of();
         }
+        SearchFilter effective = filter == null ? SearchFilter.NONE : filter;
         List<Hit> hits = new ArrayList<>();
         for (Entry entry : entries) {
-            if (casNo != null && !casNo.isBlank() && !casNo.equals(entry.chunk().getCasNo())) {
+            if (!effective.matches(entry.chunk())) {
                 continue;
             }
             double score = VectorCodec.cosine(query, entry.vector());

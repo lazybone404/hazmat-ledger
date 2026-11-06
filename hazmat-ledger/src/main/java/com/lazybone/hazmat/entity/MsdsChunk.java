@@ -35,9 +35,28 @@ public class MsdsChunk {
     @Column(name = "chemical_id")
     private Long chemicalId;
 
-    /** 与文件名一致，如 67-56-1 */
+    /** 来源文档。历史数据允许为空（迁移前没有 document 表） */
+    @Column(name = "document_id")
+    private Long documentId;
+
+    /**
+     * 知识源类型。检索过滤直接落在块上，不每次回查文档表。
+     * 历史行由 V7 迁移回填为 MSDS；新写入由索引服务显式设置。
+     */
+    @Column(name = "doc_type", nullable = false, length = 16)
+    private String docType;
+
+    /**
+     * 检索与展示用的业务键：MSDS 是与文件名一致的 CAS（如 67-56-1）；
+     * 国标/SOP 没有 CAS，用文档的 {@code source_code}（如 GB 15603-2022）填这里。
+     * 列保持 NOT NULL，避免为两类新文档改历史表的可空性（H2 与 MySQL 的 ALTER 语法不一致）。
+     */
     @Column(name = "cas_no", nullable = false, length = 32)
     private String casNo;
+
+    /** 条款号（国标 5.2.1 / SOP 步骤号）；MSDS 为空，仍用 section_no */
+    @Column(name = "clause_no", length = 64)
+    private String clauseNo;
 
     /** GB/T 16483 的节号，1–16 */
     @Column(name = "section_no", nullable = false)
@@ -57,6 +76,13 @@ public class MsdsChunk {
     /** SHA-256，增量重建时按它匹配旧块，而不是按下标 */
     @Column(name = "text_hash", nullable = false, length = 64)
     private String textHash;
+
+    /**
+     * 索引版本。一次重建产出一个版本，检索只读全局 active 版本。
+     * 版本化切换落地前允许为空：历史数据与 memory 模式不依赖它。
+     */
+    @Column(name = "index_version", length = 64)
+    private String indexVersion;
 
     /** 格式「模型名|0.1234,...」，未编码时为空 */
     @Column(columnDefinition = "TEXT")

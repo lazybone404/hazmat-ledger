@@ -9,6 +9,9 @@ import com.lazybone.hazmat.msds.ai.EmbeddingClient;
 import com.lazybone.hazmat.msds.ai.HashingEmbeddingClient;
 import com.lazybone.hazmat.msds.ai.HttpEmbeddingClient;
 import com.lazybone.hazmat.msds.ai.VectorCodec;
+import com.lazybone.hazmat.msds.vector.ScoredChunk;
+import com.lazybone.hazmat.msds.vector.VectorFilter;
+import com.lazybone.hazmat.msds.vector.VectorStore;
 import com.lazybone.hazmat.repository.MsdsChunkRepository;
 import com.lazybone.hazmat.repository.MsdsIndexMetaRepository;
 import jakarta.annotation.PreDestroy;
@@ -18,8 +21,11 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Collectors;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -54,6 +60,7 @@ public class MsdsVectorService {
     private final AiProperties properties;
     private final HashingEmbeddingClient localClient;
     private final HttpEmbeddingClient remoteClient;
+    private final VectorStore vectorStore;
 
     /**
      * 单线程足够：几百块，串行反而好排查；也避免并发写同一行块。
@@ -76,12 +83,14 @@ public class MsdsVectorService {
                              MsdsIndexMetaRepository metaRepository,
                              AiProperties properties,
                              HashingEmbeddingClient localClient,
-                             HttpEmbeddingClient remoteClient) {
+                             HttpEmbeddingClient remoteClient,
+                             VectorStore vectorStore) {
         this.chunkRepository = chunkRepository;
         this.metaRepository = metaRepository;
         this.properties = properties;
         this.localClient = localClient;
         this.remoteClient = remoteClient;
+        this.vectorStore = vectorStore;
     }
 
     /** 本轮编码的结果，写日志与状态接口都用它 */
@@ -95,8 +104,14 @@ public class MsdsVectorService {
     private record Quad(String modelId, int dimension, int chunkVersion, int schemaVersion) {
     }
 
-    /** 检索时用的向量快照。编码、重建后整体替换；读路径不加锁 */
-    private volatile MsdsVectorIndex vectorIndex = MsdsVectorIndex.empty();
+    /**
+     * 块 id → 块实体的快照。向量存储只回 id 和分数，回表要用它；
+     * 与向量存储的刷新同步替换，避免一次查询里拿到两份不同时刻的数据。
+     */
+    private volatile Map<Long, MsdsChunk> chunkSnapshot = Map.of();
+
+    /** 与 {@link MsdsVectorIndex} 的内部候选深度一致：融合需要比接口返回更深的候选 */
+    private static final int VECTOR_DEPTH = 50;
 
     /** 库里有向量、但元数据与当前配置对不上；检索要据此提示重建 */
     private volatile boolean needsRebuild = false;
@@ -117,16 +132,15 @@ public class MsdsVectorService {
         return !(activeClient() instanceof HashingEmbeddingClient);
     }
 
-    public MsdsVectorIndex vectorIndex() {
-        return vectorIndex;
-    }
-
     public boolean needsRebuild() {
         return needsRebuild;
     }
 
     /**
-     * 从库重建内存向量快照。编码、重建、启动之后调用；读侧只读 volatile 引用。
+     * 从库重建向量存储。编码、重建、启动之后调用；读侧只读 volatile 引用。
+     *
+     * <p>内存实现会真正重建索引；pgvector 实现不回表（写入由编码流程负责），
+     * 但这里的块快照仍要刷新，因为检索要用它按 id 回填正文。
      */
     public void refreshVectorIndex() {
         try {
@@ -137,9 +151,14 @@ public class MsdsVectorService {
             boolean metadataReady = meta != null && quadMatches(meta, quad);
             // 与编码侧同一条判据：有向量但身份不符时整路停用，不拿旧向量算余弦
             needsRebuild = hasVectors(chunks) && !metadataReady;
-            vectorIndex = needsRebuild
-                    ? MsdsVectorIndex.empty()
-                    : MsdsVectorIndex.build(chunks, client);
+            Map<Long, MsdsChunk> snapshot = new HashMap<>();
+            for (MsdsChunk chunk : chunks) {
+                if (chunk.getId() != null) {
+                    snapshot.put(chunk.getId(), chunk);
+                }
+            }
+            chunkSnapshot = snapshot;
+            vectorStore.refresh(needsRebuild ? List.of() : chunks, client);
         } catch (RuntimeException e) {
             // 快照是旁路：刷新失败时保留上一份，检索最多用稍旧的向量
             log.warn("刷新向量索引失败，继续使用上一份快照: {}", e.getMessage());
@@ -159,8 +178,12 @@ public class MsdsVectorService {
      * 用户看到 {@code degradedReason} 就知道语义那一路没跑。
      */
     public VectorSearch search(String query, String casNo) {
-        MsdsVectorIndex index = vectorIndex;
-        if (index.isEmpty()) {
+        return searchFiltered(query, SearchFilter.byCasNo(casNo));
+    }
+
+    /** 带完整过滤条件的向量检索；单独的动词名避免与按 CAS 的旧签名在 null 实参下歧义 */
+    public VectorSearch searchFiltered(String query, SearchFilter filter) {
+        if (!vectorStore.available()) {
             return new VectorSearch(List.of(), true, "向量索引尚未就绪，仅返回字面结果");
         }
         EmbeddingClient client = activeClient();
@@ -175,10 +198,56 @@ public class MsdsVectorService {
             log.warn("查询向量编码失败，向量路降级: {}", e.getMessage());
             return new VectorSearch(List.of(), true, "语义检索暂不可用，仅返回字面结果");
         }
-        List<MsdsVectorIndex.Hit> hits = index.search(queryVector, casNo, client.minScore());
+        SearchFilter effective = filter == null ? SearchFilter.NONE : filter;
+        List<ScoredChunk> scored;
+        try {
+            scored = vectorStore.search(queryVector,
+                    VectorFilter.of(effective.casNo(), effective.docType()),
+                    VECTOR_DEPTH, client.minScore());
+        } catch (RuntimeException e) {
+            // pg 断连、超时都属于这一类：向量路降级，字面路不受影响
+            log.warn("向量检索失败，向量路降级: {}", e.getMessage());
+            return new VectorSearch(List.of(), true, "向量存储暂不可用，仅返回字面结果");
+        }
+        List<MsdsVectorIndex.Hit> hits = resolveHits(scored);
         boolean localOnly = HashingEmbeddingClient.NAME.equals(client.name());
         return new VectorSearch(hits, localOnly,
                 localOnly ? "未配置模型，使用本地哈希向量" : null);
+    }
+
+    /**
+     * 把「块 id + 分数」映射回块实体，保持分数顺序。
+     *
+     * <p>正常情况下快照里都有；pgvector 模式下快照可能落后（例如另一个实例刚写入），
+     * 缺失的 id 回表补一次，并顺带更新快照。补不回来的直接跳过，不让一条坏数据拖垮整次检索。
+     */
+    private List<MsdsVectorIndex.Hit> resolveHits(List<ScoredChunk> scored) {
+        if (scored.isEmpty()) {
+            return List.of();
+        }
+        Map<Long, MsdsChunk> snapshot = chunkSnapshot;
+        Map<Long, MsdsChunk> known = snapshot;
+        List<Long> missing = scored.stream()
+                .map(ScoredChunk::chunkId)
+                .filter(id -> !snapshot.containsKey(id))
+                .distinct()
+                .toList();
+        if (!missing.isEmpty()) {
+            Map<Long, MsdsChunk> merged = new HashMap<>(snapshot);
+            for (MsdsChunk chunk : chunkRepository.findAllById(missing)) {
+                merged.put(chunk.getId(), chunk);
+            }
+            chunkSnapshot = merged;
+            known = merged;
+        }
+        List<MsdsVectorIndex.Hit> hits = new ArrayList<>(scored.size());
+        for (ScoredChunk item : scored) {
+            MsdsChunk chunk = known.get(item.chunkId());
+            if (chunk != null) {
+                hits.add(new MsdsVectorIndex.Hit(chunk, item.score()));
+            }
+        }
+        return hits;
     }
 
     /**

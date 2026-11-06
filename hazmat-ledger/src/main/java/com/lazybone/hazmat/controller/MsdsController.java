@@ -9,6 +9,7 @@ import com.lazybone.hazmat.msds.MsdsAnswerService;
 import com.lazybone.hazmat.msds.MsdsIndexService;
 import com.lazybone.hazmat.msds.MsdsSearchService;
 import com.lazybone.hazmat.msds.MsdsVectorService;
+import com.lazybone.hazmat.msds.SearchFilter;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -44,15 +45,17 @@ public class MsdsController {
     /**
      * 检索 MSDS 原文：字面路与向量路融合，降级信息随结果返回。
      *
-     * @param q     查询内容，如「甲醇误食怎么办」
-     * @param casNo 可选，限定某一种试剂
-     * @param topK  返回条数，默认 5，最多 20
+     * @param q       查询内容，如「甲醇误食怎么办」
+     * @param casNo   可选，限定某一种试剂
+     * @param docType 可选，限定知识源类型（MSDS / GB / SOP）；不传则三类一起检索
+     * @param topK    返回条数，默认 5，最多 20
      */
     @GetMapping("/search")
     public ApiResponse<MsdsSearchResult> search(@RequestParam("q") String q,
                                                 @RequestParam(value = "casNo", required = false) String casNo,
+                                                @RequestParam(value = "docType", required = false) String docType,
                                                 @RequestParam(value = "topK", defaultValue = "5") int topK) {
-        return ApiResponse.ok(searchService.search(q, casNo, topK));
+        return ApiResponse.ok(searchService.searchFiltered(q, SearchFilter.of(casNo, docType), topK));
     }
 
     /**

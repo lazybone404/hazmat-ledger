@@ -134,10 +134,35 @@ class MsdsSearchTest {
     }
 
     @Test
+    void docTypeFilterSelectsKnowledgeSource() {
+        // 国标样例：条款「禁忌物料隔离」是最有辨识度的一块
+        List<MsdsHit> gb = searchService.searchFiltered("禁忌物料隔离", SearchFilter.of(null, "GB"), 10).hits();
+        assertThat(gb).isNotEmpty();
+        assertThat(gb).allMatch(hit -> "GB".equals(hit.docType()));
+        assertThat(gb).anyMatch(hit -> hit.clauseNo() != null);
+
+        // SOP 样例：步骤级切块后，引用能落到具体步骤号
+        List<MsdsHit> sop = searchService.searchFiltered("泄漏 报警 疏散", SearchFilter.of(null, "SOP"), 10).hits();
+        assertThat(sop).isNotEmpty();
+        assertThat(sop).allMatch(hit -> "SOP".equals(hit.docType()));
+
+        // 不加过滤时三类一起召回，说明 docType 是可选收窄而不是默认只查 MSDS
+        assertThat(searchService.search("禁忌物料隔离", null, 10).hits())
+                .anyMatch(hit -> "GB".equals(hit.docType()));
+    }
+
+    @Test
+    void unknownDocTypeIsRejectedInsteadOfSilentlyFiltering() {
+        assertThatThrownBy(() -> SearchFilter.of(null, "PDF"))
+                .isInstanceOf(BusinessException.class);
+    }
+
+    @Test
     void rebuildReusesUnchangedChunksInsteadOfRecreatingThem() {
         MsdsIndexService.RebuildResult first = indexService.rebuild();
 
-        assertThat(first.files()).isEqualTo(18);
+        // 18 份 MSDS + 1 份国标样例 + 1 份 SOP 样例；语料增减时同步改这里
+        assertThat(first.files()).isEqualTo(20);
         assertThat(first.chunks()).isEqualTo(first.reused());
 
         MsdsIndexService.RebuildResult second = indexService.rebuild();

@@ -29,7 +29,8 @@ class MsdsAnswerServiceTest {
 
     @Test
     void healthySearchWithNoHitsSaysNotFound() {
-        when(searchService.search(anyString(), any(), anyInt()))
+        // 显式 (String) 转型：MsdsSearchService 现在同时有 casNo 与 SearchFilter 两个重载
+        when(searchService.search(anyString(), (String) any(), anyInt()))
                 .thenReturn(new MsdsSearchResult(List.of(), false, null, false, false));
         when(chatClient.available()).thenReturn(false);
 
@@ -46,11 +47,12 @@ class MsdsAnswerServiceTest {
     void intentSectionWinsSentenceSelectionEvenWhenItRanksLower() {
         MsdsHit toxicology = new MsdsHit(1L, "67-56-1", "甲醇", 11, "毒理学信息",
                 "[甲醇] §11 毒理学信息\n- 主要侵入途径：吸入、皮肤吸收、食入。",
-                0.9, List.of("literal"));
+                0.9, List.of("literal"), "MSDS", null);
         MsdsHit firstAid = new MsdsHit(2L, "67-56-1", "甲醇", 4, "急救措施",
                 "[甲醇] §4 急救措施\n- 吸入：立即脱离污染区域。\n- 食入：立即漱口，给饮足量温水，就医。",
-                0.4, List.of("literal"));
-        when(searchService.search(anyString(), any(), anyInt()))
+                0.4, List.of("literal"), "MSDS", null);
+        // 显式 (String) 转型：MsdsSearchService 现在同时有 casNo 与 SearchFilter 两个重载
+        when(searchService.search(anyString(), (String) any(), anyInt()))
                 .thenReturn(new MsdsSearchResult(List.of(toxicology, firstAid), false, null, false, false));
         when(chatClient.available()).thenReturn(false);
 
@@ -68,8 +70,9 @@ class MsdsAnswerServiceTest {
         // 本地哈希向量对任何查询都会给出若干命中，但片段与问题毫无词面对应
         MsdsHit unrelated = new MsdsHit(1L, "7722-64-7", "高锰酸钾", 1, "化学品及企业标识",
                 "[高锰酸钾] §1 化学品及企业标识\n- 中文名称：高锰酸钾\n- 英文名称：Potassium permanganate",
-                0.09, List.of("vector"));
-        when(searchService.search(anyString(), any(), anyInt()))
+                0.09, List.of("vector"), "MSDS", null);
+        // 显式 (String) 转型：MsdsSearchService 现在同时有 casNo 与 SearchFilter 两个重载
+        when(searchService.search(anyString(), (String) any(), anyInt()))
                 .thenReturn(new MsdsSearchResult(List.of(unrelated), false, null, false, false));
         when(chatClient.available()).thenReturn(false);
 
@@ -83,7 +86,8 @@ class MsdsAnswerServiceTest {
 
     @Test
     void degradedSearchWithNoHitsDoesNotClaimKnowledgeIsMissing() {
-        when(searchService.search(anyString(), any(), anyInt()))
+        // 显式 (String) 转型：MsdsSearchService 现在同时有 casNo 与 SearchFilter 两个重载
+        when(searchService.search(anyString(), (String) any(), anyInt()))
                 .thenReturn(new MsdsSearchResult(
                         List.of(), true, "向量索引为空，已降级为字面检索", false, false));
         when(chatClient.available()).thenReturn(false);
