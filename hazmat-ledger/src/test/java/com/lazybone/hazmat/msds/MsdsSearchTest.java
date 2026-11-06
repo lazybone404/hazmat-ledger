@@ -38,15 +38,14 @@ class MsdsSearchTest {
 
     @Test
     void indexCoversEverySeedFile() {
-        long chunkCount = chunkRepository.count();
+        int activeCount = indexService.activeChunks().size();
 
-        assertThat(chunkCount).isGreaterThanOrEqualTo(18L * 16);
-        assertThat(indexService.literalIndex().size()).isEqualTo((int) chunkCount);
+        assertThat(activeCount).isGreaterThanOrEqualTo(18 * 16);
+        assertThat(indexService.literalIndex().size()).isEqualTo(activeCount);
     }
 
     @Test
     void concurrentRebuildDoesNotDuplicateChunks() throws Exception {
-        long before = chunkRepository.count();
         ExecutorService pool = Executors.newFixedThreadPool(4);
         try {
             List<Future<MsdsIndexService.RebuildResult>> futures = new ArrayList<>();
@@ -60,9 +59,12 @@ class MsdsSearchTest {
             pool.shutdownNow();
         }
 
-        // 没有锁时四个事务会各自看到同一份旧快照、各插一份，块数翻倍
-        assertThat(chunkRepository.count()).isEqualTo(before);
-        assertThat(indexService.literalIndex().size()).isEqualTo((int) before);
+        // 版本化后库里固定保留 active + previous 两版；
+        // 没有锁时四个事务会各自看到同一份旧快照、给同一版本各插一份，块数会超过两倍
+        int activeCount = indexService.activeChunks().size();
+        assertThat(activeCount).isGreaterThanOrEqualTo(18 * 16);
+        assertThat(chunkRepository.count()).isEqualTo(2L * activeCount);
+        assertThat(indexService.literalIndex().size()).isEqualTo(activeCount);
     }
 
     @Test
@@ -164,10 +166,15 @@ class MsdsSearchTest {
         // 18 份 MSDS + 1 份国标样例 + 1 份 SOP 样例；语料增减时同步改这里
         assertThat(first.files()).isEqualTo(20);
         assertThat(first.chunks()).isEqualTo(first.reused());
+        assertThat(first.version()).isNotBlank();
 
         MsdsIndexService.RebuildResult second = indexService.rebuild();
         assertThat(second.created()).isZero();
-        assertThat(second.deleted()).isZero();
         assertThat(second.reused()).isEqualTo(second.chunks());
+        // 每次重建都产生新版本，上一版留作回滚目标
+        assertThat(second.version()).isNotEqualTo(first.version());
+        assertThat(second.previousVersion()).isEqualTo(first.version());
+        // 只保留 active + previous：第二次重建清理的是更早的那一版
+        assertThat(second.deleted()).isEqualTo(second.chunks());
     }
 }

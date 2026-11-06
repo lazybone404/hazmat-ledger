@@ -163,7 +163,7 @@ public class MsdsVectorService {
      */
     public void refreshVectorIndex() {
         try {
-            List<MsdsChunk> chunks = chunkRepository.findAll();
+            List<MsdsChunk> chunks = activeChunks();
             EmbeddingClient client = activeClient();
             Quad quad = currentQuad(client);
             MsdsIndexMeta meta = loadMeta();
@@ -220,8 +220,9 @@ public class MsdsVectorService {
         SearchFilter effective = filter == null ? SearchFilter.NONE : filter;
         List<ScoredChunk> scored;
         try {
+            // 带 active 版本过滤：pg 里可能同时留着上一版的行，检索不能把两版都召回
             scored = vectorStore.search(queryVector,
-                    VectorFilter.of(effective.casNo(), effective.docType()),
+                    new VectorFilter(effective.casNo(), effective.docType(), activeVersion()),
                     VECTOR_DEPTH, client.minScore());
         } catch (RuntimeException e) {
             // pg 断连、超时都属于这一类：向量路降级，字面路不受影响
@@ -280,7 +281,7 @@ public class MsdsVectorService {
             return new EncodeResult(0, 0, 0, false, quad.modelId());
         }
         try {
-            List<MsdsChunk> chunks = chunkRepository.findAllByOrderByCasNoAscSectionNoAscPartNoAsc();
+            List<MsdsChunk> chunks = activeChunks();
             MsdsIndexMeta meta = ensureMetaForEncoding(chunks, quad);
             if (meta == null) {
                 log.warn("向量编码已停用：{}", rebuildReason(loadMeta(), quad));
@@ -386,7 +387,7 @@ public class MsdsVectorService {
     public ReconcileResult reconcile() {
         EmbeddingClient client = activeClient();
         Quad quad = currentQuad(client);
-        List<MsdsChunk> chunks = chunkRepository.findAll();
+        List<MsdsChunk> chunks = activeChunks();
         List<MsdsChunk> encoded = chunks.stream()
                 .filter(chunk -> chunk.getId() != null && hasUsableVector(chunk, quad))
                 .toList();
@@ -475,10 +476,9 @@ public class MsdsVectorService {
     public ResetResult prepareForReindex() {
         EmbeddingClient client = activeClient();
         Quad quad = currentQuad(client);
-        List<MsdsChunk> chunks = chunkRepository.findAllByOrderByCasNoAscSectionNoAscPartNoAsc();
+        List<MsdsChunk> chunks = activeChunks();
         MsdsIndexMeta meta = loadMeta();
         boolean quadMatches = meta != null && quadMatches(meta, quad);
-        boolean hasVectors = hasVectors(chunks);
 
         int cleared = 0;
         // 无论走哪条路径，显式重建都清失败计数：用户点这一下就是要重试。
@@ -525,7 +525,7 @@ public class MsdsVectorService {
 
     /** 状态接口的数据源。每次全量扫一遍：几百行，比维护计数器的失效逻辑便宜 */
     public MsdsIndexStatus status() {
-        List<MsdsChunk> chunks = chunkRepository.findAll();
+        List<MsdsChunk> chunks = activeChunks();
         EmbeddingClient client = activeClient();
         Quad quad = currentQuad(client);
         MsdsIndexMeta meta = loadMeta();
@@ -551,7 +551,7 @@ public class MsdsVectorService {
         }
 
         // 存储层视图：pg 模式下这就是「派生数据是否追平事实源」的体检结果
-        long vectorRows = vectorStore.count(null);
+        long vectorRows = vectorStore.count(meta == null ? null : meta.getActiveVersion());
         int missingRows = 0;
         if (!encodedIds.isEmpty() && vectorRows >= 0) {
             try {
@@ -571,7 +571,9 @@ public class MsdsVectorService {
                 metadataReady, needsRebuild,
                 needsRebuild ? rebuildReason(meta, quad) : null,
                 encoding.get(),
-                vectorStore.name(), vectorRows, missingRows);
+                vectorStore.name(), vectorRows, missingRows,
+                meta == null ? null : meta.getActiveVersion(),
+                meta == null ? null : meta.getPreviousVersion());
     }
 
     public boolean isEncoding() {
@@ -621,6 +623,23 @@ public class MsdsVectorService {
 
     private MsdsIndexMeta loadMeta() {
         return metaRepository.findById(META_ID).orElse(null);
+    }
+
+    /** 当前生效的索引版本；为空表示还没做过版本化重建（历史数据） */
+    public String activeVersion() {
+        MsdsIndexMeta meta = loadMeta();
+        return meta == null ? null : meta.getActiveVersion();
+    }
+
+    /**
+     * 当前生效版本的块。所有编码、统计、快照都必须用它，
+     * 不能回退到 {@code findAll()}——上一版的行还在库里，全表查会把同一段正文算两次。
+     */
+    private List<MsdsChunk> activeChunks() {
+        String active = activeVersion();
+        return active == null
+                ? chunkRepository.findByIndexVersionIsNullOrderByCasNoAscSectionNoAscPartNoAsc()
+                : chunkRepository.findByIndexVersionOrderByCasNoAscSectionNoAscPartNoAsc(active);
     }
 
     private Quad currentQuad(EmbeddingClient client) {

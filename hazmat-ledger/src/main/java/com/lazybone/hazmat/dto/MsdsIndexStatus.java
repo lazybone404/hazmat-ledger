@@ -15,9 +15,11 @@ import java.time.LocalDateTime;
  * {@code failed} 是「失败次数已达上限、不再自动重试」的块，普通失败仍算在
  * {@code pending} 里，下一轮会再试。
  *
- * 最后一组是存储视图：{@code vectorStore} 为当前实现（memory / pgvector），
- * {@code vectorRows} 为存储里的行数（不可用时为 -1），{@code missingRows} 为
- * 「MySQL 已编码但存储里没有」的行数（-1 表示对账未执行或对不了账）。
+ * 最后一组是存储与版本视图：{@code vectorStore} 为当前实现（memory / pgvector），
+ * {@code vectorRows} 为 active 版本在存储里的行数（不可用时为 -1），{@code missingRows} 为
+ * 「MySQL 已编码但存储里没有」的行数（-1 表示对账未执行或对不了账）；
+ * {@code activeVersion} / {@code previousVersion} 是版本化切换的当前指针与回滚目标
+ * （都为空表示还没做过版本化重建）。
  */
 public record MsdsIndexStatus(
         int chunks,
@@ -37,5 +39,7 @@ public record MsdsIndexStatus(
         boolean encodingInProgress,
         String vectorStore,
         long vectorRows,
-        int missingRows) {
+        int missingRows,
+        String activeVersion,
+        String previousVersion) {
 }
