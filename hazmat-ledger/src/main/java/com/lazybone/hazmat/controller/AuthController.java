@@ -1,7 +1,9 @@
 package com.lazybone.hazmat.controller;
 
 import com.lazybone.hazmat.common.ApiResponse;
+import com.lazybone.hazmat.common.BusinessException;
 import com.lazybone.hazmat.common.UnauthorizedException;
+import com.lazybone.hazmat.dto.ChangePasswordRequest;
 import com.lazybone.hazmat.dto.LoginRequest;
 import com.lazybone.hazmat.dto.LoginResponse;
 import com.lazybone.hazmat.dto.UserView;
@@ -9,6 +11,7 @@ import com.lazybone.hazmat.entity.AppUser;
 import com.lazybone.hazmat.repository.AppUserRepository;
 import com.lazybone.hazmat.security.JwtService;
 import com.lazybone.hazmat.security.LoginAttemptGuard;
+import com.lazybone.hazmat.security.TokenVersionService;
 import jakarta.validation.Valid;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -40,15 +43,18 @@ public class AuthController {
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final LoginAttemptGuard loginAttemptGuard;
+    private final TokenVersionService tokenVersions;
 
     public AuthController(AppUserRepository userRepository,
                           PasswordEncoder passwordEncoder,
                           JwtService jwtService,
-                          LoginAttemptGuard loginAttemptGuard) {
+                          LoginAttemptGuard loginAttemptGuard,
+                          TokenVersionService tokenVersions) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
         this.loginAttemptGuard = loginAttemptGuard;
+        this.tokenVersions = tokenVersions;
     }
 
     @PostMapping("/login")
@@ -85,5 +91,39 @@ public class AuthController {
             throw new UnauthorizedException("账号已停用");
         }
         return ApiResponse.ok(UserView.from(user));
+    }
+
+    /**
+     * 本人改密。改完自增撤销版本，**当前 token 也一并失效**——
+     * 如果保留当前会话，攻击者拿到旧 token 后只要不刷新就仍然可用，改密就白做了。
+     * 前端需要重新登录，这个代价是刻意的。
+     */
+    @PostMapping("/password")
+    public ApiResponse<Void> changePassword(@AuthenticationPrincipal Jwt jwt,
+                                            @Valid @RequestBody ChangePasswordRequest request) {
+        AppUser user = userRepository.findByUsername(jwt.getSubject())
+                .orElseThrow(() -> new UnauthorizedException("账号不存在"));
+        if (!passwordEncoder.matches(request.oldPassword(), user.getPasswordHash())) {
+            throw new BusinessException("旧密码不正确");
+        }
+        if (request.oldPassword().equals(request.newPassword())) {
+            throw new BusinessException("新密码不能与旧密码相同");
+        }
+        user.setPasswordHash(passwordEncoder.encode(request.newPassword()));
+        user.setTokenVersion(user.getTokenVersion() + 1);
+        userRepository.save(user);
+        tokenVersions.evict(user.getUsername());
+        return ApiResponse.ok(null);
+    }
+
+    /** 让本账号在所有设备上的 token 立即失效；本质上就是撤销版本 +1。 */
+    @PostMapping("/logout-all")
+    public ApiResponse<Void> logoutAll(@AuthenticationPrincipal Jwt jwt) {
+        AppUser user = userRepository.findByUsername(jwt.getSubject())
+                .orElseThrow(() -> new UnauthorizedException("账号不存在"));
+        user.setTokenVersion(user.getTokenVersion() + 1);
+        userRepository.save(user);
+        tokenVersions.evict(user.getUsername());
+        return ApiResponse.ok(null);
     }
 }

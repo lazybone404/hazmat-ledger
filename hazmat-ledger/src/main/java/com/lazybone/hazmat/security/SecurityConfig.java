@@ -31,7 +31,8 @@ import java.util.List;
  * 几个刻意的决定：
  * <ul>
  *   <li><b>不用 session。</b>接口本身就是产品，没有同源前端会话；无状态也让多实例部署时
- *       不需要共享登录态。代价是停用用户后，已签发的 token 在过期前仍有效。</li>
+ *       不需要共享登录态。停用/改密/改角色靠 {@code token_version} 撤销旧 token，
+ *       校验带 30 秒本地缓存，多实例下最迟 30 秒生效。</li>
  *   <li><b>默认拒绝。</b>{@code anyRequest().authenticated()}，只放行登录、H2 控制台、
  *       错误页、探活与接口文档。新增接口忘了标注权限时是「要登录」，而不是「裸奔」。</li>
  *   <li><b>角色写进 token 的 roles claim</b>，不查库鉴权。每次请求都查库会让 JWT 失去
@@ -50,6 +51,7 @@ public class SecurityConfig {
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http,
                                            JwtDecoder jwtDecoder,
+                                           TokenVersionFilter tokenVersionFilter,
                                            RestAuthenticationEntryPoint entryPoint,
                                            RestAccessDeniedHandler accessDeniedHandler) throws Exception {
         http
@@ -63,7 +65,10 @@ public class SecurityConfig {
                         // 只放行 health/info，actuator 的其它端点也没有暴露。
                         // health 用 /** 而不是精确匹配：liveness/readiness 是子路径，
                         // 写成精确匹配会让探针返回 401，容器就一直重启或摘流量。
-                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info")
+                        // metrics/prometheus 给抓取器用，通常不带 token；
+                        // 它们不含业务数据，生产环境仍应由网关限制来源。
+                        .requestMatchers("/actuator/health", "/actuator/health/**",
+                                "/actuator/info", "/actuator/prometheus")
                         .permitAll()
                         // 接口文档与 Swagger UI。可用 SPRINGDOC_ENABLED=false 整体关闭；
                         // 开放时它会把全部路由暴露出来，生产环境应由网关限制在内网
@@ -79,7 +84,11 @@ public class SecurityConfig {
                                 .decoder(jwtDecoder)
                                 .jwtAuthenticationConverter(jwtAuthenticationConverter()))
                         .authenticationEntryPoint(entryPoint)
-                        .accessDeniedHandler(accessDeniedHandler));
+                        .accessDeniedHandler(accessDeniedHandler))
+                // 解码完成后再核对撤销版本；必须在 BearerTokenAuthenticationFilter 之后
+                .addFilterAfter(tokenVersionFilter,
+                        org.springframework.security.oauth2.server.resource.web.authentication
+                                .BearerTokenAuthenticationFilter.class);
         return http.build();
     }
 

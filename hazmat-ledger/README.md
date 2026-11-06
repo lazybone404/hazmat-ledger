@@ -46,7 +46,7 @@
 ```bash
 export JAVA_HOME="/c/Program Files/Java/jdk-21.0.11"   # 见下方「环境要求」
 ./mvnw spring-boot:run        # 端口 8090，启动后自动灌 18 条试剂档案、21 个批次
-./mvnw test                   # 189 个测试，不需要任何中间件；E4 对照与 E9 生成评测需外部服务，默认跳过（2 个）
+./mvnw test                   # 203 个测试，不需要任何中间件；E4 对照与 E9 生成评测需外部服务，默认跳过（2 个）
 ```
 
 演示用的固定日期数据里特意留了**已过期**和**临期**两类批次，所以启动后直接就能看到预警。
@@ -81,9 +81,21 @@ java -jar target/hazmat-ledger-0.0.1-SNAPSHOT.jar --spring.profiles.active=mysql
 连接配置在 `src/main/resources/application-mysql.properties`，默认 `root/88888888`（可用 `DB_PASSWORD` 环境变量覆盖），
 表结构由 Flyway 的 `db/migration` 脚本创建。MySQL 下如果不想灌种子数据，加 `--hazmat.seed.enabled=false`。
 
+### 生产配置（prod profile）
+
+```bash
+# 必填：DB_USERNAME / DB_PASSWORD / HAZMAT_JWT_SECRET（≥32 字节）
+java -jar target/hazmat-ledger-0.0.1-SNAPSHOT.jar --spring.profiles.active=prod
+```
+
+`application-prod.properties` 里数据库账号、密码、JWT 密钥**都不给默认值**，缺失直接启动失败。
+另外有一道启动自检（`ProductionSafetyCheck`）：prod 下还开着 `seed-users` / `seed.enabled`，
+或者密钥还是开发默认值，都会拒绝启动——这类配置一旦带上生产库，就是可直接登录的后门。
+
 ### 容器化部署
 
 ```bash
+cp .env.example .env              # 填 DB_PASSWORD 与 HAZMAT_JWT_SECRET（.env 已被 .gitignore 忽略）
 docker compose up -d --build      # app(8090) + mysql(宿主机 3307)
 curl http://localhost:8090/actuator/health
 docker compose down               # 保留数据卷；加 -v 连数据一起删
@@ -98,13 +110,20 @@ docker run --rm -p 8090:8090 \
 ```
 
 镜像分两阶段构建：构建阶段用 Maven + JDK 21 打包，运行阶段只留 JRE，并以非 root 用户启动。
-依赖下载走 `docker/maven-settings.xml` 里的国内镜像。`compose.yaml` 里的密码与 JWT 密钥都是演示值，部署到任何公开环境前必须换掉。
+依赖下载走 `docker/maven-settings.xml` 里的国内镜像。
+
+`compose.yaml` 里数据库口令有演示默认值，**JWT 密钥没有**：缺失时 compose 直接报错，
+而不是起一个用公开默认密钥签名的应用。容器带 healthcheck（`/actuator/health/readiness`）、
+内存上限与 30 秒优雅停机；`docker compose --profile pgvector up -d` 会额外启动向量库
+（B3 落地后使用）。
 
 ### 接口文档与探活
 
 - Swagger UI：`http://localhost:8090/swagger-ui.html`（先调登录接口拿 token，再点 Authorize）
 - OpenAPI JSON：`http://localhost:8090/v3/api-docs`
-- 健康检查：`http://localhost:8090/actuator/health`，只暴露 `health` / `info`
+- 健康检查：`http://localhost:8090/actuator/health`；`/actuator/health/readiness` 供编排判断是否接流量
+- 指标：`http://localhost:8090/actuator/prometheus`。只暴露 `health` / `info` / `prometheus` 三个端点；
+  指标里没有业务数据，但能看出流量与错误率，生产仍建议由网关限制抓取来源
 
 文档与探活都不需要登录。生产环境用 `SPRINGDOC_ENABLED=false` 关闭文档，或由网关限制在内网。
 
@@ -121,6 +140,12 @@ docker run --rm -p 8090:8090 \
 |---|---|---|---|
 | POST | `/api/auth/login` | 公开 | 登录，返回 JWT |
 | GET | `/api/auth/me` | 登录 | 当前用户信息 |
+| POST | `/api/auth/password` | 登录 | 本人改密（需旧密码）。改完 `token_version` +1，**当前 token 也立即失效**，需重新登录 |
+| POST | `/api/auth/logout-all` | 登录 | 撤销本账号全部 token（各设备一起下线） |
+| GET | `/api/users` | ADMIN | 账号列表 |
+| POST | `/api/users` | ADMIN | 建号（用户名、显示名、角色、初始密码） |
+| PATCH | `/api/users/{id}` | ADMIN | 改显示名 / 角色 / 启停。改角色或启停会撤销对方旧 token；不能停用或降级**最后一个启用中的 ADMIN** |
+| POST | `/api/users/{id}/password` | ADMIN | 管理员重置密码，对方旧 token 立即失效 |
 | POST | `/api/chemicals` | ADMIN | 新建试剂档案（CAS 号唯一）；可选 `postOpenDays` 配置开封后可用天数，不传表示不做开封追踪 |
 | GET | `/api/chemicals?keyword=&category=&hazardLevel=&page=&size=&sort=` | 登录 | 试剂分页列表：关键词匹配名称/CAS，分类与危险等级精确筛选 |
 | GET | `/api/chemicals/expiring?withinDays=` | 登录 | 效期预警分页：仍有库存且 `withinDays` 天内到**可用截止日**（含已过期），按 `usableUntil` 升序 |
@@ -155,6 +180,7 @@ docker run --rm -p 8090:8090 \
 | GET | `/api/reports/stock-summary?withinDays=` | 登录 | 库存汇总（MyBatis-Plus）：按分类 + 单位给出试剂数、批次数、总量、临期量与过期量 |
 | GET | `/api/reports/flow-trend?days=` | 登录 | 出入库趋势（MyBatis-Plus）：按自然日 + 变更类型汇总，数量带符号 |
 | GET | `/actuator/health` | 公开 | 探活，返回 `{"status":"UP"}`；`/actuator/health/liveness`、`/actuator/health/readiness` 同样公开 |
+| GET | `/actuator/prometheus` | 公开 | Prometheus 抓取端点。指标含 `msds_search_seconds`（带 `degraded` 标签）、`msds_vector_encode_total`、`msds_vector_index_size`、`requisition_transition_total`（`from`/`to`）、`incompatibility_conflicts_total`（`co_stored`） |
 | GET | `/swagger-ui.html`、`/v3/api-docs` | 公开 | 交互式接口文档与 OpenAPI JSON |
 
 身份一律来自 token：申请人、审批人、操作人都不能由请求体或查询参数指定。
@@ -544,10 +570,11 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
 
 ## 6. 已知缺口（被问到要主动说）
 
-- 用户体系是最小实现：只有登录、角色与停用，没有注册、改密、找回密码与账号管理接口；
-  种子账号密码来自配置，生产必须改掉。角色写进 JWT，改角色或停用账号后，
-  已签发的 token 在 8 小时有效期内仍然可用——要即时踢下线需引入 token 黑名单或版本号，
-  本项目没有做。台账里的申请人/审批人存用户名而不是外键，用户改名不会影响历史签名，
+- 用户体系没有注册与找回密码：账号由管理员建（或种子数据），忘记密码只能由管理员重置。
+  停用、改角色、改密、logout-all 都会自增 `app_user.token_version`，旧 token 立即失效；
+  但校验带 30 秒本地缓存，**多实例部署时最迟 30 秒生效**，单实例由管理接口主动清缓存。
+  token 撤销版本存在主库上，每个登录用户的首次校验要多一次索引查询（之后 30 秒走缓存）。
+  台账里的申请人/审批人存用户名而不是外键，用户改名不会影响历史签名，
   但显示名与账号的对应关系要另外维护。
 - 双人复核只按 `hazardLevel` 分了「一人 / 两人」两档，没有配「哪些试剂要三级审批」。新增档位要动状态机。
 - 报废目前是直接扣减 + 留痕（记录原因和操作人），没有独立的报废单与审批流；若合规要求审批，应在 `scrap` 前加一层单据状态机。

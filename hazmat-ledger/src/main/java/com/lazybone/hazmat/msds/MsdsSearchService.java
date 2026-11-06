@@ -6,6 +6,7 @@ import com.lazybone.hazmat.dto.MsdsSearchResult;
 import com.lazybone.hazmat.entity.Chemical;
 import com.lazybone.hazmat.entity.MsdsChunk;
 import com.lazybone.hazmat.repository.ChemicalRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -14,6 +15,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 /**
@@ -43,17 +45,20 @@ public class MsdsSearchService {
     private final ChemicalRepository chemicalRepository;
     private final MsdsRetrievalProperties retrieval;
     private final SearchConcurrencyLimiter limiter;
+    private final MeterRegistry meterRegistry;
 
     public MsdsSearchService(MsdsIndexService indexService,
                              MsdsVectorService vectorService,
                              ChemicalRepository chemicalRepository,
                              MsdsRetrievalProperties retrieval,
-                             SearchConcurrencyLimiter limiter) {
+                             SearchConcurrencyLimiter limiter,
+                             MeterRegistry meterRegistry) {
         this.indexService = indexService;
         this.vectorService = vectorService;
         this.chemicalRepository = chemicalRepository;
         this.retrieval = retrieval;
         this.limiter = limiter;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -74,6 +79,7 @@ public class MsdsSearchService {
         }
         String normalized = query.trim();
         SearchFilter effective = filter == null ? SearchFilter.NONE : filter;
+        long startedAt = System.nanoTime();
 
         // 参数错误（400）先于限流判断：调用方改参数就能解决的事，没必要占一个许可。
         // 闸门只保护向量路：许可拿不到时跳过向量检索，字面路照常跑。
@@ -94,12 +100,16 @@ public class MsdsSearchService {
                             List.of(), true, "检索并发已满，向量路降级，仅返回字面结果");
 
             List<MsdsHit> hits = fuse(index, literal, vector.hits(), topK, names);
-            return new MsdsSearchResult(
+            MsdsSearchResult result = new MsdsSearchResult(
                     hits,
                     vector.degraded(),
                     vector.degradedReason(),
                     vectorService.isEncoding(),
                     vectorService.needsRebuild());
+            // degraded 作为标签而不是独立指标：降级时长的分布才是判断「有多可用」的依据
+            meterRegistry.timer("msds.search", "degraded", Boolean.toString(result.degraded()))
+                    .record(System.nanoTime() - startedAt, TimeUnit.NANOSECONDS);
+            return result;
         } finally {
             // 只有真正拿到许可才释放；无条件 release 会把许可数越抬越高，闸门形同虚设
             if (vectorPermit) {

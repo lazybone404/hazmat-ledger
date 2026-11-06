@@ -34,6 +34,12 @@ FROM eclipse-temurin:21-jre
 # 不用 root 跑应用；被攻破时至少不能直接改容器内文件
 RUN groupadd --system app && useradd --system --gid app --home-dir /app app
 
+# curl 只用于容器的 healthcheck（探 /actuator/health）。
+# 基础镜像里没有它，而用 bash /dev/tcp 手搓探测在编排里既不可读也不可靠。
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY --from=build /build/target/*.jar app.jar
 RUN chown -R app:app /app

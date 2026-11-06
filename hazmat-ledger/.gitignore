@@ -32,6 +32,11 @@ build/
 ### VS Code ###
 .vscode/
 
+### 密钥 ###
+# compose 用的真实环境变量；样例见 .env.example
+.env
+*.env.local
+
 ### 本地工具与缓存 ###
 # CodeGraph 索引由本机生成，不同机器重建即可
 .codegraph/
