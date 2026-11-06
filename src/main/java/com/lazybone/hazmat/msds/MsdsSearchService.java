@@ -61,6 +61,11 @@ public class MsdsSearchService {
      * 把连接握在事务里等几秒是不必要的；读档案与读块各自有短事务。
      */
     public MsdsSearchResult search(String query, String casNo, int topK) {
+        return searchFiltered(query, SearchFilter.byCasNo(casNo), topK);
+    }
+
+    /** 带完整过滤条件的检索；保留旧三参签名委托到这里，现有调用点不用改 */
+    public MsdsSearchResult searchFiltered(String query, SearchFilter filter, int topK) {
         if (query == null || query.isBlank()) {
             throw new BusinessException("检索内容不能为空");
         }
@@ -68,6 +73,7 @@ public class MsdsSearchService {
             throw new BusinessException("检索内容最长 " + MAX_QUERY_LENGTH + " 个字符");
         }
         String normalized = query.trim();
+        SearchFilter effective = filter == null ? SearchFilter.NONE : filter;
 
         // 参数错误（400）先于限流判断：调用方改参数就能解决的事，没必要占一个许可。
         // 闸门只保护向量路：许可拿不到时跳过向量检索，字面路照常跑。
@@ -81,9 +87,9 @@ public class MsdsSearchService {
 
             int depth = retrieval.effectiveDepth();
             MsdsLiteralIndex index = indexService.literalIndex();
-            List<MsdsLiteralIndex.Hit> literal = index.search(normalized, casNo, depth);
+            List<MsdsLiteralIndex.Hit> literal = index.searchFiltered(normalized, effective, depth);
             MsdsVectorService.VectorSearch vector = vectorPermit
-                    ? vectorService.search(normalized, casNo)
+                    ? vectorService.searchFiltered(normalized, effective)
                     : new MsdsVectorService.VectorSearch(
                             List.of(), true, "检索并发已满，向量路降级，仅返回字面结果");
 
@@ -155,7 +161,9 @@ public class MsdsSearchService {
                         fusedHit.chunk.getSectionTitle(),
                         fusedHit.chunk.getContent(),
                         fusedHit.score,
-                        List.copyOf(fusedHit.sources)))
+                        List.copyOf(fusedHit.sources),
+                        fusedHit.chunk.getDocType(),
+                        fusedHit.chunk.getClauseNo()))
                 .toList();
     }
 

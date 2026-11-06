@@ -118,9 +118,20 @@ public final class MsdsLiteralIndex {
     }
 
     public List<Hit> search(String query, String casNo, int topK) {
+        return searchFiltered(query, SearchFilter.byCasNo(casNo), topK);
+    }
+
+    /**
+     * 带完整过滤条件的检索。
+     *
+     * <p>不叫 {@code search} 重载：调用方传 {@code null} 时两个重载都能匹配，
+     * 编译期就歧义了；换个名字比让每个调用点写 {@code (String) null} 干净。
+     */
+    public List<Hit> searchFiltered(String query, SearchFilter filter, int topK) {
         if (chunks.isEmpty() || query == null || query.isBlank()) {
             return List.of();
         }
+        SearchFilter effective = filter == null ? SearchFilter.NONE : filter;
         List<String> expansions = MsdsQueryExpander.expand(query);
         String expanded = expansions.isEmpty() ? query : query + " " + String.join(" ", expansions);
         Set<String> tokens = new HashSet<>(queryTokens(expanded));
@@ -138,7 +149,7 @@ public final class MsdsLiteralIndex {
             }
             double weight = idf.getOrDefault(token, 0.0);
             for (int index : posting) {
-                if (casNo != null && !casNo.isBlank() && !casNo.equals(chunks.get(index).getCasNo())) {
+                if (!effective.matches(chunks.get(index))) {
                     continue;
                 }
                 // 词频用 log 抑制：同一块里说两遍比说一遍更相关，但相关性不该翻倍

@@ -125,7 +125,7 @@ docker run --rm -p 8090:8090 \
 | GET | `/api/chemicals?keyword=&category=&hazardLevel=&page=&size=&sort=` | 登录 | 试剂分页列表：关键词匹配名称/CAS，分类与危险等级精确筛选 |
 | GET | `/api/chemicals/expiring?withinDays=` | 登录 | 效期预警分页：仍有库存且 `withinDays` 天内到**可用截止日**（含已过期），按 `usableUntil` 升序 |
 | GET | `/api/chemicals/{id}` | 登录 | 试剂详情（列表只有摘要字段，详情页按 id 取完整档案） |
-| GET | `/api/chemicals/{id}/safety?q=&topK=` | 登录 | **知识库入口**：按该试剂 CAS 限定检索 MSDS，返回章节号、原文与降级原因。没有索引过 MSDS 时返回 `available=false` + 明确提示，不返回空列表 |
+| GET | `/api/chemicals/{id}/safety?q=&docType=&topK=` | 登录 | **知识库入口**：按该试剂 CAS 限定检索，返回章节号/条款号、原文与降级原因。`docType` 可选 `MSDS`/`GB`/`SOP`。没有索引过该试剂时返回 `available=false` + 明确提示，不返回空列表 |
 | GET | `/api/incompatibilities` | 登录 | **混放检查**：返回 `conflicts`（同柜且禁配）、`separatedConflicts`（禁配但分柜）、`uncovered`（规则表没记录，**不代表安全**）；每条带 `sharedLocations` |
 | GET | `/api/chemicals/{id}/incompatibilities` | 登录 | 单个试剂的混放检查，含 `locations`、同柜/分柜冲突与未覆盖搭档；无库存时返回 `inStock=false`，不产生虚假冲突 |
 | GET | `/api/chemicals/{id}/ledger?page=&size=&sort=` | 登录 | 某试剂的出入库流水分页，默认按发生时间倒序 |
@@ -148,7 +148,7 @@ docker run --rm -p 8090:8090 \
 | POST | `/api/requisitions/{reqNo}/issue` | ADMIN | 出库 |
 | POST | `/api/requisitions/{reqNo}/close` | ADMIN | 核销 |
 | POST | `/api/requisitions/{reqNo}/cancel` | 登录（仅本人） | 撤回 |
-| GET | `/api/msds/search?q=&casNo=&topK=` | 登录 | 检索 MSDS 片段。`q` 必填、上限 200 字符，`casNo` 可选，`topK` 默认 5、上限 20。返回 `MsdsSearchResult`：命中列表（每条带 `sources`）+ 降级原因 + 索引状态 |
+| GET | `/api/msds/search?q=&casNo=&docType=&topK=` | 登录 | 检索知识片段（MSDS / 国标 / SOP）。`q` 必填、上限 200 字符，`casNo` 与 `docType` 可选，`topK` 默认 5、上限 20。返回 `MsdsSearchResult`：命中列表（每条带 `sources`、`docType`、`clauseNo`）+ 降级原因 + 索引状态 |
 | GET | `/api/msds/ask?q=&casNo=&topK=` | 登录 | 检索并作答。返回 `MsdsAnswer`：`answerable` / `generated` / `answer` / `citations` / `degraded` / `degradedReason`。引用由后端从命中生成，模型只能选编号（最多前 5 条）；无模型或调用失败退回原文摘录（`generated=false`），无依据时 `answerable=false` |
 | POST | `/api/msds/reindex` | ADMIN | 扫描 `resources/msds/*.md` 增量落块；四元组变了就作废旧向量，然后在后台开始编码 |
 | GET | `/api/msds/status` | ADMIN | 向量索引状态：进度、暂停原因、当前模型、元数据是否需重建 |
@@ -563,6 +563,11 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
   不能把接口返回的空冲突列表当成全库安全结论。混放检查已按批次 `location` 判断同柜，
   但柜位没有主数据、是自由文本，拼写不一致会漏报；也不区分柜内层板与同房间不同柜。
   检查是即刻快照，没有历史轨迹与定时巡检。
+- 三类知识源（MSDS / 国标 / SOP）已接通同一套切块与检索链路，但仓库里的国标与 SOP
+  是明确标注「演示样例摘录，非标准全文」的改写文本，**不能作为合规依据**；接入真实标准
+  需要重新授权语料并复核条款号。
+- 向量仍存在 `msds_chunk.vector` 文本列里、检索时全量加载做暴力余弦；`VectorStore`
+  抽象与 `memory`/`pgvector` 配置项已就位，pgvector 实现尚未落地（计划 B3）。
 - 没有定时任务：效期预警是查询时算的，真实系统应该有定时扫描 + 通知；盘点提醒同样没有。
 - 过载保护只在单实例内生效：登录失败计数与检索许可都在进程内存里，多副本各算各的；
   容量参数（连接池 10 / 等 3 秒、语句超时 5 秒、检索 4 个许可）是按小规模估的初值，

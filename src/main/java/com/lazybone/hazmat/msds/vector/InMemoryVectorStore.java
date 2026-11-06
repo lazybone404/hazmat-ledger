@@ -1,0 +1,65 @@
+package com.lazybone.hazmat.msds.vector;
+
+import com.lazybone.hazmat.entity.MsdsChunk;
+import com.lazybone.hazmat.msds.MsdsVectorIndex;
+import com.lazybone.hazmat.msds.SearchFilter;
+import com.lazybone.hazmat.msds.ai.EmbeddingClient;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * 默认实现：内存里的向量快照，查询时暴力余弦。
+ *
+ * <p>直接复用 {@link MsdsVectorIndex}，保证开启 pgvector 之前的行为与之前逐字节一致；
+ * 这一层只是把「快照从哪来、结果怎么表达」与业务代码隔开。
+ *
+ * <p>不实现 {@code upsert} / {@code deleteByVersions}：内存快照每次都从数据库全量重建，
+ * 增量写没有意义。需要版本操作时切到 pgvector 实现。
+ */
+public class InMemoryVectorStore implements VectorStore {
+
+    /** 与 {@link MsdsVectorIndex} 的内部候选深度保持一致 */
+    private static final int MAX_DEPTH = 50;
+
+    private volatile MsdsVectorIndex index = MsdsVectorIndex.empty();
+
+    @Override
+    public String name() {
+        return "memory";
+    }
+
+    @Override
+    public void refresh(List<MsdsChunk> chunks, EmbeddingClient client) {
+        index = MsdsVectorIndex.build(chunks, client);
+    }
+
+    @Override
+    public List<ScoredChunk> search(float[] query, VectorFilter filter, int limit, double minScore) {
+        VectorFilter effective = filter == null ? VectorFilter.NONE : filter;
+        // indexVersion 为空时不过滤；B4 切换后内存实现按块上的版本号再筛一遍
+        List<MsdsVectorIndex.Hit> hits = index.searchFiltered(
+                query, SearchFilter.of(effective.casNo(), effective.docType()), minScore);
+        List<ScoredChunk> scored = new ArrayList<>(hits.size());
+        for (MsdsVectorIndex.Hit hit : hits) {
+            if (effective.indexVersion() != null
+                    && !effective.indexVersion().equals(hit.chunk().getIndexVersion())) {
+                continue;
+            }
+            scored.add(new ScoredChunk(hit.chunk().getId(), hit.score()));
+        }
+        int max = Math.max(1, Math.min(limit, MAX_DEPTH));
+        return scored.size() <= max ? scored : scored.subList(0, max);
+    }
+
+    @Override
+    public long count(String indexVersion) {
+        // 全部块目前都还没有版本号；按版本计数只在 pgvector 实现里有意义
+        return indexVersion == null || indexVersion.isBlank() ? index.size() : 0;
+    }
+
+    @Override
+    public boolean available() {
+        return !index.isEmpty();
+    }
+}

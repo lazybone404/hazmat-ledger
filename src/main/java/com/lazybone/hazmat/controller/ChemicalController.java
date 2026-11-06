@@ -102,8 +102,9 @@ public class ChemicalController {
     public ApiResponse<ChemicalSafetyView> safety(
             @Positive @PathVariable Long id,
             @Size(max = 200) @RequestParam("q") String q,
+            @RequestParam(value = "docType", required = false) String docType,
             @Min(1) @Max(20) @RequestParam(defaultValue = "5") int topK) {
-        return ApiResponse.ok(chemicalSafetyService.safety(id, q, topK));
+        return ApiResponse.ok(chemicalSafetyService.safety(id, q, docType, topK));
     }
 
     /**

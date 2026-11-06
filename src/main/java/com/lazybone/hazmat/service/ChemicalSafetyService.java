@@ -5,6 +5,7 @@ import com.lazybone.hazmat.dto.ChemicalSafetyView;
 import com.lazybone.hazmat.entity.Chemical;
 import com.lazybone.hazmat.msds.MsdsIndexService;
 import com.lazybone.hazmat.msds.MsdsSearchService;
+import com.lazybone.hazmat.msds.SearchFilter;
 import org.springframework.stereotype.Service;
 
 /**
@@ -36,6 +37,10 @@ public class ChemicalSafetyService {
     }
 
     public ChemicalSafetyView safety(Long id, String query, int topK) {
+        return safety(id, query, null, topK);
+    }
+
+    public ChemicalSafetyView safety(Long id, String query, String docType, int topK) {
         // 先取档案：id 不存在时应该是 404，而不是「查询为空」的 400
         Chemical chemical = chemicalService.findById(id);
 
@@ -54,6 +59,6 @@ public class ChemicalSafetyService {
         }
 
         return ChemicalSafetyView.available(chemical, query,
-                searchService.search(query, chemical.getCasNo(), topK));
+                searchService.searchFiltered(query, SearchFilter.of(chemical.getCasNo(), docType), topK));
     }
 }

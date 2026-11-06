@@ -11,6 +11,10 @@ import java.util.List;
  * {@code sources} 记录这一条被哪几路召回（{@code literal} / {@code vector}）。
  * 融合后分数已经是 RRF 值，单看数字无法判断「是两路都命中，还是只有一路」，
  * 排障和评测都需要这个信息。
+ *
+ * {@code docType} 与 {@code clauseNo} 是三类知识源接入后新增的：
+ * 引用要能说清「这是 MSDS 第 4 节」还是「GB 15603 第 5.2 条」，
+ * 前端和生成侧都靠这两个字段拼出来源标签。
  */
 public record MsdsHit(
         Long chunkId,
@@ -20,6 +24,8 @@ public record MsdsHit(
         String sectionTitle,
         String content,
         double score,
-        List<String> sources
+        List<String> sources,
+        String docType,
+        String clauseNo
 ) {
 }

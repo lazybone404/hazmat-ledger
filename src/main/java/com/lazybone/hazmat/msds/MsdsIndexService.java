@@ -1,8 +1,14 @@
 package com.lazybone.hazmat.msds;
 
 import com.lazybone.hazmat.entity.Chemical;
+import com.lazybone.hazmat.entity.KnowledgeDocType;
+import com.lazybone.hazmat.entity.KnowledgeDocument;
 import com.lazybone.hazmat.entity.MsdsChunk;
+import com.lazybone.hazmat.msds.knowledge.ChunkerRegistry;
+import com.lazybone.hazmat.msds.knowledge.DocumentChunker;
+import com.lazybone.hazmat.msds.knowledge.TextChunk;
 import com.lazybone.hazmat.repository.ChemicalRepository;
+import com.lazybone.hazmat.repository.KnowledgeDocumentRepository;
 import com.lazybone.hazmat.repository.MsdsChunkRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -15,6 +21,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -41,11 +48,14 @@ public class MsdsIndexService {
     private static final Logger log = LoggerFactory.getLogger(MsdsIndexService.class);
     private static final String MSDS_PATTERN = "classpath*:msds/*.md";
     private static final Pattern NAME_PATTERN = Pattern.compile("中文名称：\\s*([^\\s（(]+)");
+    private static final Pattern TITLE_PATTERN = Pattern.compile("^#\\s+(.+?)\\s*$", Pattern.MULTILINE);
     /** 与 rebuild 里给块加的名称前缀保持一致，从库里恢复索引时靠它取回名称 */
     private static final Pattern SUBJECT_PREFIX = Pattern.compile("^\\[([^\\]]+)] ");
 
     private final MsdsChunkRepository chunkRepository;
     private final ChemicalRepository chemicalRepository;
+    private final KnowledgeDocumentRepository documentRepository;
+    private final ChunkerRegistry chunkers;
     private final TransactionTemplate transactionTemplate;
     private final ResourcePatternResolver resolver = new PathMatchingResourcePatternResolver();
 
@@ -61,9 +71,13 @@ public class MsdsIndexService {
 
     public MsdsIndexService(MsdsChunkRepository chunkRepository,
                             ChemicalRepository chemicalRepository,
+                            KnowledgeDocumentRepository documentRepository,
+                            ChunkerRegistry chunkers,
                             TransactionTemplate transactionTemplate) {
         this.chunkRepository = chunkRepository;
         this.chemicalRepository = chemicalRepository;
+        this.documentRepository = documentRepository;
+        this.chunkers = chunkers;
         this.transactionTemplate = transactionTemplate;
     }
 
@@ -131,6 +145,9 @@ public class MsdsIndexService {
             files++;
 
             String chemicalName = registryNames.getOrDefault(casNo, extractChemicalName(chunks));
+            KnowledgeDocument document = upsertDocument(
+                    KnowledgeDocType.MSDS, casNo, chemicalName == null ? casNo : chemicalName,
+                    casNo, resource.getDescription(), markdown);
             for (MsdsChunker.Chunk parsed : chunks) {
                 // 块前挂上化学品名：第 4 节「急救措施」正文里通常不出现「甲醇」二字，
                 // 不挂名字的话，问「甲醇误食」时这一块只能靠运气被向量路捞回来
@@ -147,10 +164,14 @@ public class MsdsIndexService {
                     entity.setSectionTitle(parsed.sectionTitle());
                     entity.setPartNo(parsed.partNo());
                     entity.setChemicalId(chemicalIds.get(casNo));
+                    entity.setDocumentId(document.getId());
+                    entity.setDocType(KnowledgeDocType.MSDS.name());
                     reused++;
                 } else {
                     entity = MsdsChunk.builder()
                             .casNo(casNo)
+                            .documentId(document.getId())
+                            .docType(KnowledgeDocType.MSDS.name())
                             .sectionNo(parsed.sectionNo())
                             .sectionTitle(parsed.sectionTitle())
                             .partNo(parsed.partNo())
@@ -161,6 +182,60 @@ public class MsdsIndexService {
                     created++;
                 }
                 current.add(entity);
+            }
+        }
+
+        // 国标与 SOP：同一套块表，切法与引用单位按 doc_type 分化
+        for (KnowledgeDocType type : List.of(KnowledgeDocType.GB, KnowledgeDocType.SOP)) {
+            DocumentChunker chunker = chunkers.of(type);
+            for (Resource resource : knowledgeResources(type)) {
+                String filename = resource.getFilename();
+                String sourceCode = filename.substring(0, filename.length() - ".md".length());
+                String markdown = read(resource, filename);
+                List<TextChunk> parsedChunks = chunker.split(markdown, sourceCode);
+                if (parsedChunks.isEmpty()) {
+                    log.warn("知识文档没有解析出任何块，已跳过: {}/{}", type, filename);
+                    continue;
+                }
+                files++;
+
+                String title = extractTitle(markdown, sourceCode);
+                KnowledgeDocument document = upsertDocument(
+                        type, sourceCode, title, null, resource.getDescription(), markdown);
+                // partNo 在文档内连续编号：条款号不写进 section_no（列是 NOT NULL），
+                // 用连续 partNo 保证库里读取顺序稳定，也让排序不依赖条款号的字典序
+                int partNo = 0;
+                for (TextChunk parsed : parsedChunks) {
+                    String content = "[" + title + "] " + parsed.content();
+                    String textHash = MsdsChunker.sha256(content);
+
+                    Deque<MsdsChunk> candidates = reusableByHash.get(key(sourceCode, textHash));
+                    MsdsChunk entity = candidates == null ? null : candidates.pollFirst();
+                    if (entity != null) {
+                        entity.setDocumentId(document.getId());
+                        entity.setDocType(type.name());
+                        entity.setClauseNo(parsed.clauseNo());
+                        entity.setSectionNo(0);
+                        entity.setSectionTitle(truncateTitle(parsed.sectionTitle()));
+                        entity.setPartNo(partNo++);
+                        entity.setChemicalId(null);
+                        reused++;
+                    } else {
+                        entity = MsdsChunk.builder()
+                                .casNo(sourceCode)
+                                .documentId(document.getId())
+                                .docType(type.name())
+                                .clauseNo(parsed.clauseNo())
+                                .sectionNo(0)
+                                .sectionTitle(truncateTitle(parsed.sectionTitle()))
+                                .partNo(partNo++)
+                                .content(content)
+                                .textHash(textHash)
+                                .build();
+                        created++;
+                    }
+                    current.add(entity);
+                }
             }
         }
 
@@ -216,6 +291,56 @@ public class MsdsIndexService {
         } catch (IOException e) {
             throw new UncheckedIOException("扫描 MSDS 目录失败", e);
         }
+    }
+
+    private List<Resource> knowledgeResources(KnowledgeDocType type) {
+        String pattern = "classpath*:knowledge/" + type.name().toLowerCase() + "/*.md";
+        try {
+            Resource[] resources = resolver.getResources(pattern);
+            Arrays.sort(resources, (a, b) -> String.valueOf(a.getFilename()).compareTo(String.valueOf(b.getFilename())));
+            return List.of(resources);
+        } catch (IOException e) {
+            throw new UncheckedIOException("扫描 " + type + " 目录失败", e);
+        }
+    }
+
+    private static String read(Resource resource, String filename) {
+        try {
+            return new String(resource.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("读取知识文档失败: " + filename, e);
+        }
+    }
+
+    /** 文档标题取第一个一级标题；取不到就用文件名，保证文档表里没有空标题 */
+    private static String extractTitle(String markdown, String fallback) {
+        Matcher matcher = TITLE_PATTERN.matcher(markdown);
+        return matcher.find() ? matcher.group(1).trim() : fallback;
+    }
+
+    /** section_title 列只有 64 字符，条款标题可能更长；截断而不是让整次重建失败 */
+    private static String truncateTitle(String title) {
+        if (title == null) {
+            return "";
+        }
+        return title.length() <= 64 ? title : title.substring(0, 64);
+    }
+
+    private KnowledgeDocument upsertDocument(KnowledgeDocType type, String sourceCode, String title,
+                                             String casNo, String sourcePath, String markdown) {
+        LocalDateTime now = LocalDateTime.now();
+        KnowledgeDocument document = documentRepository.findBySourceCode(sourceCode)
+                .orElseGet(() -> KnowledgeDocument.builder()
+                        .sourceCode(sourceCode)
+                        .createdAt(now)
+                        .build());
+        document.setDocType(type);
+        document.setTitle(title.length() <= 200 ? title : title.substring(0, 200));
+        document.setCasNo(casNo);
+        document.setSourcePath(sourcePath);
+        document.setContentHash(MsdsChunker.sha256(markdown));
+        document.setUpdatedAt(now);
+        return documentRepository.save(document);
     }
 
     /** 从第 1 节里取中文名称。取不到也不影响索引，只是该试剂的问题少一条线索 */

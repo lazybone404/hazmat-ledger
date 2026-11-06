@@ -2,7 +2,8 @@
 
 > 状态：**阶段 1–4 已实现**（切块、双路检索、RRF、降级、增量重建、评测，2026-10-26 验收；
 > `/ask` 生成 + 引用校验 + 无模型降级，2026-11-06 验收）；
-> 真实生成模型的端到端验证尚未完成（默认关闭，本机 Ollama 只装了 bge-m3）；前端未接入；
+> 真实生成模型已跑 E9（在线 DeepSeek + 本机 bge-m3，实验记录 §1.6），默认仍关闭；
+> 内容忠实度目前是单人抽检，缺独立复核。前端未接入；
 > 本地 bge-m3 已完成 E4 对照（实验记录 §1.5），融合权重已按模型分档，默认 embedding 尚未切换。
 > 范围：`hazmat-ledger` 内的 MSDS 检索与问答，不引入向量数据库、不引入 LangChain4j、不改变现有库存与审批链路。
 >
@@ -70,6 +71,21 @@ MSDS 的 16 节是天然语义边界，且用户问题通常直接指向某一�
 
 **切块上限由模型能力倒推**：DashScope `text-embedding-v4` 单条上限 8192 token，单节远小于该值，不存在截断风险；如果换成 `bge-small`（512 token ≈ 400–500 中文字），必须把单块压到 400 字以内。换模型必须重算这个数，不能照抄。
 
+### 3.3 三类知识源：MSDS / 国标 / SOP
+
+同一套块表要容纳三类文档，切法与引用单位不同，因此按 `doc_type` 分化：
+
+| 类型 | 目录 | 切法 | 引用单位 |
+|---|---|---|---|
+| MSDS | `resources/msds/*.md` | 16 节，单节超 400 字再按段落切（`MsdsSectionChunker` 包装现有 `MsdsChunker`） | 第 N 节 |
+| GB | `resources/knowledge/gb/*.md` | 按条款号（`## 5.2.1 标题` 或独立成段的条款号）切；识别不到条款时整篇一块 | 第 5.2.1 条 |
+| SOP | `resources/knowledge/sop/*.md` | 按「步骤 N」或「N.」标题切；正文编号列表不当作步骤 | 步骤 N |
+
+- 块表新增 `doc_type`、`clause_no`、`document_id`；文档级元数据（标题、来源路径、内容 hash）进 `knowledge_document`。
+- 非 MSDS 文档没有 CAS 号，`cas_no` 列暂时填 `source_code`（如 `GB15603-2022`）。这样列保持 `NOT NULL`，迁移不用区分 H2/MySQL 的 `ALTER` 语法；语义上它只是「文档主键」。
+- 检索默认三类一起召回，`docType` 可选收窄；非法值直接 400，不静默回退——写错一个词却只得到 MSDS 结果，比报错更难发现。
+- **语料边界**：仓库里的国标/SOP 是明确标注「演示样例摘录，非标准全文，条款号仅用于链路验证」的改写文本，不冒充标准原文。接入真实标准前，引用只能用于演示，不能作为合规依据。
+
 ## 4. 索引
 
 ### 4.1 表结构
@@ -85,11 +101,30 @@ CREATE TABLE msds_chunk (
     content       TEXT NOT NULL,          -- 「§N 标题」+「[化学品名]」前缀 + 正文
     text_hash     VARCHAR(64) NOT NULL,   -- SHA-256，块级增量判据
     vector        TEXT,                   -- 模型名|0.1234,...；未编码时为空
-    indexed_at    TIMESTAMP
+    indexed_at    TIMESTAMP,
+    -- V7 起的三类知识源字段；历史数据只有 MSDS，默认值保证兼容
+    document_id   BIGINT,
+    doc_type      VARCHAR(16) DEFAULT 'MSDS' NOT NULL,
+    clause_no     VARCHAR(64),            -- 国标条款号；MSDS 为空
+    index_version VARCHAR(64)             -- B4 版本化切换后写入
 );
 
 CREATE INDEX idx_msds_chunk_cas  ON msds_chunk (cas_no);
 CREATE INDEX idx_msds_chunk_hash ON msds_chunk (cas_no, text_hash);
+CREATE INDEX idx_msds_chunk_doc  ON msds_chunk (doc_type, cas_no);
+
+CREATE TABLE knowledge_document (
+    id           BIGINT PRIMARY KEY,
+    doc_type     VARCHAR(16) NOT NULL,    -- MSDS / GB / SOP
+    source_code  VARCHAR(128) NOT NULL,   -- 唯一：MSDS 用 CAS，其它用文件名
+    title        VARCHAR(200) NOT NULL,
+    cas_no       VARCHAR(32),
+    version      VARCHAR(64),
+    source_path  VARCHAR(255),
+    content_hash VARCHAR(64),             -- 整篇 hash，用于判断文档是否变过
+    created_at   TIMESTAMP NOT NULL,
+    updated_at   TIMESTAMP
+);
 
 CREATE TABLE msds_index_meta (
     id              INT PRIMARY KEY,      -- 固定 1
@@ -106,6 +141,8 @@ CREATE TABLE msds_index_meta (
 `content` 里有两层前缀，都参与 `text_hash`：`§N 标题` 让块脱离文档也能读懂自己是什么，`[化学品名]` 解决「第 4 节正文不出现试剂名」导致的问题（见 3.2）。
 
 `msds_index_meta` 是「这批向量属于谁」的身份证。模型、维度、切块规则任一不符，向量路整体停用，不混用旧向量——不同模型算出的向量不在同一个空间，余弦算得出数但排序没有意义。
+
+向量存储通过 `hazmat.vector.store` 选择实现：默认 `memory`（进程内暴力余弦，复用 `MsdsVectorIndex`），`pgvector` 由 B3 接入。检索服务只依赖 `VectorStore` 接口，存储层只回「块 id + 分数」，正文按 id 回表，避免向量库和事实源出现两份内容。
 
 ### 4.2 写入：块先落库，向量后补
 
@@ -159,7 +196,7 @@ CREATE TABLE msds_index_meta (
 并发与资源边界（审查后补）：
 
 - **重建锁必须包住整个事务。** `rebuild` 是「查旧块 → 删 stale → 插新块」的读改写，两个请求同时进来会各自看到同一份旧快照、各插一份。用 `TransactionTemplate` 把事务放进 `ReentrantLock` 内层，而不是给方法加 `@Transactional`——后者的提交发生在代理返回之后，方法体内 `unlock` 时另一个线程仍读不到已提交数据。锁只在单实例内有效，多实例要靠数据库唯一约束或分布式锁。
-- **编码线程池的队列有界（容量 8）。** `reindex` 没有鉴权，无界队列在脚本循环调用下会堆积任务直到堆耗尽。队列满时丢弃并记日志；丢弃是安全的，因为排队中的任务会按最新库状态重新取待编码块。
+- **编码线程池的队列有界（容量 8）。** `reindex` 现在限 ADMIN，但账号泄露或脚本循环调用仍可能堆积任务；无界队列会一直涨到堆耗尽。队列满时丢弃并记日志；丢弃是安全的，因为排队中的任务会按最新库状态重新取待编码块。
 - **重建与编码并发是最终一致。** 重建清空旧向量时，正在请求中的那一批仍可能写回旧模型向量。这些块的模型名与元数据不符，下一轮编码会识别并重算，不会被当作可用向量。让 `reindex` 等几十秒的模型调用结束更糟。
 - **显式重建只写变更行。** 288 块通常只有少数带失败记录，`prepareForReindex` 收集真正发生变化的块再 `saveAll`，避免每次重建都全表写回。
 
@@ -289,7 +326,7 @@ query ──┬─→ 字面检索（内存倒排，字 + 双字） → top 50
 
 | 方法 | 路径 | 阶段 | 说明 |
 |---|---|---|---|
-| GET | `/api/msds/search?q=...&casNo=...&topK=5` | 3（已实现） | 字面 + 向量 RRF 融合，返回 `MsdsSearchResult`（命中列表 + 降级/索引状态） |
+| GET | `/api/msds/search?q=...&casNo=...&docType=...&topK=5` | 3（已实现） | 字面 + 向量 RRF 融合，返回 `MsdsSearchResult`（命中列表 + 降级/索引状态）。`docType` 可选值 `MSDS`/`GB`/`SOP`，不传则三类一起检索；每条命中带 `docType` 与 `clauseNo` |
 | POST | `/api/msds/reindex` | 1–2（已实现） | 扫文件增量落块，按四元组决定是否作废旧向量，后台开始编码；返回 `rebuild` 与 `vectors` 两段 |
 | GET | `/api/msds/status` | 2（已实现） | 索引状态：块数、已编码、待编码、已放弃、暂停原因、模型与维度、四元组是否一致、是否在编码 |
 | GET | `/api/msds/ask?q=...&casNo=...&topK=5` | 4（已实现） | 检索 + 生成，返回 `MsdsAnswer`（回答、引用、降级/拒答状态）；模型只看到前 5 条 |
@@ -298,12 +335,14 @@ query ──┬─→ 字面检索（内存倒排，字 + 双字） → top 50
 
 `casNo` 可选：指定时只检索该试剂，不指定时检索全部。指定时返回结果里仍带试剂名，因为同一问题可能命中多个相似试剂（甲醇/乙醇）。
 
+`docType` 同样可选，作用在字面路与向量路之前，而不是检索后截断：先过滤再排序，才能保证「只要国标」时拿到的确实是国标里的前 N 条，而不是混合结果里剩下的几条。`/api/chemicals/{id}/safety` 也接受同名参数，默认不过滤。
+
 `POST /api/msds/reindex` 在阶段 1 只做切块与字面索引，没有模型调用成本；阶段 2 加入向量回填后，这一步会触发 embedding 调用，接口文档与状态提示已写明。
 
 两条输入边界：
 
 - `search` 的 `q` 限制 200 字符。分词、同义词扩展与逐块打分都随查询长度线性增长，未认证接口不应接受任意长文本。
-- `reindex` / `status` 是管理接口，当前项目没有用户体系，因此未加鉴权。部署时应由网关或内网访问控制兜住，不能直接暴露到公网。`reindex` 还会清除失败暂停并触发编码，所以这个缺口不只是「重建索引」那么轻。
+- `reindex` / `status` 是管理接口，已限 ADMIN。但仍建议放在网关或内网之后：`reindex` 会清除失败暂停并触发编码，账号泄露时的影响不止「重建索引」。
 
 ## 8. 评测
 

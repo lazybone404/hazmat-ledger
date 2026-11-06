@@ -183,6 +183,7 @@ class OpenAiChatAnswerClientTest {
 
     private static MsdsHit hit(Long chunkId, String casNo, String name,
                                int sectionNo, String title, String content) {
-        return new MsdsHit(chunkId, casNo, name, sectionNo, title, content, 0.1, List.of("literal"));
+        return new MsdsHit(chunkId, casNo, name, sectionNo, title, content, 0.1, List.of("literal"),
+                "MSDS", null);
     }
 }

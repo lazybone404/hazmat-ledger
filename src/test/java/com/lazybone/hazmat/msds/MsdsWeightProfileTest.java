@@ -50,7 +50,8 @@ class MsdsWeightProfileTest {
         AiProperties aiProperties = new AiProperties();
         HashingEmbeddingClient local = new HashingEmbeddingClient(aiProperties);
         HttpEmbeddingClient remote = new HttpEmbeddingClient(aiProperties, new ObjectMapper());
-        MsdsVectorService service = new MsdsVectorService(null, null, aiProperties, local, remote);
+        MsdsVectorService service = new MsdsVectorService(null, null, aiProperties, local, remote,
+                new com.lazybone.hazmat.msds.vector.InMemoryVectorStore());
 
         assertThat(service.usesSemanticEmbedding()).isFalse();
 
