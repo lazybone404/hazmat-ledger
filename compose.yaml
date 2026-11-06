@@ -10,6 +10,10 @@
 # 向量库（B3 之后可用）：
 #   docker compose --profile pgvector up -d
 #
+# RabbitMQ（MSDS 编码任务队列）默认随全栈启动；不需要时：
+#   HAZMAT_MQ_ENABLED=false docker compose up -d mysql app
+# 管理台：http://localhost:15672（账号见 .env 的 RABBITMQ_USERNAME/PASSWORD）
+#
 # 只想用 H2 跑（不启动 MySQL）：
 #   docker build -t hazmat-ledger:local .
 #   docker run --rm -p 8090:8090 -e HAZMAT_JWT_SECRET=<至少32字节> hazmat-ledger:local
@@ -65,6 +69,27 @@ services:
       start_period: 10s
     mem_limit: 512m
 
+  # RabbitMQ：只承载 MSDS 编码任务。任务表在 MySQL 里，broker 丢了任务不会丢。
+  # 默认随全栈启动；不跑 MQ 时用 HAZMAT_MQ_ENABLED=false docker compose up -d mysql app。
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-hazmat}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-hazmat-demo-password}
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # 管理台
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    # broker 只做编码唤醒，512MB 对几百条任务足够
+    mem_limit: 512m
+
   app:
     build: .
     depends_on:
@@ -72,6 +97,10 @@ services:
         condition: service_healthy
       # 只有启用 pgvector profile 时才存在；required: false 让默认演示不因它缺失而起不来
       pgvector:
+        condition: service_healthy
+        required: false
+      # broker 起不来不应拖垮台账与检索；应用照常启动，编码任务留 PENDING 等 relay
+      rabbitmq:
         condition: service_healthy
         required: false
     environment:
@@ -88,6 +117,12 @@ services:
       HAZMAT_PG_URL: ${HAZMAT_PG_URL:-jdbc:postgresql://pgvector:5432/${PG_VECTOR_DB:-hazmat_vectors}}
       HAZMAT_PG_USERNAME: ${PG_VECTOR_USER:-hazmat}
       HAZMAT_PG_PASSWORD: ${PG_VECTOR_PASSWORD:-hazmat-demo-password}
+      # 全栈默认启用 MQ；不启 broker 时设为 false，编码回退到进程内 executor
+      HAZMAT_MQ_ENABLED: ${HAZMAT_MQ_ENABLED:-true}
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: "5672"
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-hazmat}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-hazmat-demo-password}
       # 容器日志里不需要每条 SQL
       JPA_SHOW_SQL: "false"
       # 容器内总内存按 limits 的 75% 给堆，和 Dockerfile 的 MaxRAMPercentage 一致
@@ -108,3 +143,4 @@ services:
 volumes:
   mysql-data:
   pgvector-data:
+  rabbitmq-data:

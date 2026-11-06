@@ -46,8 +46,8 @@
 ```bash
 export JAVA_HOME="/c/Program Files/Java/jdk-21.0.11"   # 见下方「环境要求」
 ./mvnw spring-boot:run        # 端口 8090，启动后自动灌 18 条试剂档案、21 个批次
-./mvnw test                   # 216 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
-                              # MySQL 实机用例是 *IT（4 个），不参与默认执行，见「连真实 MySQL」
+./mvnw test                   # 228 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
+                              # MySQL 实机与 RabbitMQ 链路是 *IT（4 + 1 个），不参与默认执行，见下文
 ```
 
 演示用的固定日期数据里特意留了**已过期**和**临期**两类批次，所以启动后直接就能看到预警。
@@ -91,7 +91,7 @@ MySQL 下如果不想灌种子数据，加 `--hazmat.seed.enabled=false`。
 ./mvnw -Dapi.version=1.44 -Dtest=MySqlMigrationIT test
 ```
 
-它验证 V1–V10 在 MySQL 8.4 上一次跑完、`ddl-auto=validate` 能启动、中文往返不乱码、
+它验证 V1–V11 在 MySQL 8.4 上一次跑完、`ddl-auto=validate` 能启动、中文往返不乱码、
 CAS 对的唯一约束与 `CHECK` 都生效、分页与排序结果正确。Docker 版本较低的机器不需要 `api.version`。
 
 ### 生产配置（prod profile）
@@ -109,7 +109,7 @@ java -jar target/hazmat-ledger-0.0.1-SNAPSHOT.jar --spring.profiles.active=prod
 
 ```bash
 cp .env.example .env              # 填 DB_PASSWORD 与 HAZMAT_JWT_SECRET（.env 已被 .gitignore 忽略）
-docker compose up -d --build      # app(8090) + mysql(宿主机 3307)
+docker compose up -d --build      # app(8090) + mysql(宿主机 3307) + rabbitmq(5672 / 管理台 15672)
 curl http://localhost:8090/actuator/health
 docker compose down               # 保留数据卷；加 -v 连数据一起删
 ```
@@ -140,6 +140,36 @@ curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:8090/api/msds/re
 
 pg 没起来时应用照常启动，向量路降级到字面检索；切回 `memory` 即可整体回退。
 pgvector 集成测试同样需要这个容器：`HAZMAT_PGVECTOR=true ./mvnw -Dtest=PgVectorStoreTest test`。
+
+### 编码任务队列（RabbitMQ，可选）
+
+MQ 只承载 MSDS 向量编码任务，库存扣减、审批、出库、盘点、登录与台账写入都不经过它。
+默认 `hazmat.mq.enabled=false`，裸 H2、单测与只跑台账时不需要 broker；`compose.yaml`
+默认把它打开。
+
+```bash
+docker compose up -d rabbitmq                       # 5672；管理台 http://localhost:15672（hazmat / .env 里的口令）
+HAZMAT_MQ_ENABLED=true ./mvnw spring-boot:run       # 本地启动时显式打开
+docker compose stop rabbitmq                        # 模拟 broker 故障：应用照常启动，任务留 PENDING
+docker compose start rabbitmq                       # relay 默认 30 秒内补发
+```
+
+- 任务表 `msds_encode_task` 是事实源，消息只带 `taskId`；重复投递靠条件 UPDATE claim 去重。
+- 重试 3 次、指数退避；耗尽后任务转 `DEAD`，消息进 `hazmat.msds.encode.dlq`。
+- `GET /api/msds/encode-tasks?limit=20`（ADMIN）查看最近任务；
+  `POST /api/msds/reindex` 的返回体带 `encodeTaskId`（MQ 关闭时为 null）。
+- 指标：`msds_encode_task_total{event=...}` 与 `msds_encode_task_pending`。
+- RabbitMQ DOWN 不会让 `/actuator/health` 失败（`management.health.rabbit.enabled=false`），
+  检索继续用旧向量；积压看任务表与 pending 指标。
+
+真实 broker 的端到端用例需要 Docker：
+
+```bash
+./mvnw -Dapi.version=1.44 -Dtest=MsdsEncodeMqIT test
+```
+
+它验证「投递 → claim → 编码 → DONE」一条成功链路；重试/死信/租约等状态机规则
+由默认套件里的 `EncodeTaskServiceTest`、`EncodeTaskRelayTest` 直接覆盖，不依赖 broker。
 
 ### 接口文档与探活
 
@@ -199,14 +229,15 @@ pgvector 集成测试同样需要这个容器：`HAZMAT_PGVECTOR=true ./mvnw -Dt
 | POST | `/api/requisitions/{reqNo}/cancel` | 登录（仅本人） | 撤回 |
 | GET | `/api/msds/search?q=&casNo=&docType=&topK=` | 登录 | 检索知识片段（MSDS / 国标 / SOP）。`q` 必填、上限 200 字符，`casNo` 与 `docType` 可选，`topK` 默认 5、上限 20。返回 `MsdsSearchResult`：命中列表（每条带 `sources`、`docType`、`clauseNo`）+ 降级原因 + 索引状态 |
 | GET | `/api/msds/ask?q=&casNo=&topK=` | 登录 | 检索并作答。返回 `MsdsAnswer`：`answerable` / `generated` / `answer` / `citations` / `degraded` / `degradedReason`。引用由后端从命中生成，模型只能选编号（最多前 5 条）；无模型或调用失败退回原文摘录（`generated=false`），无依据时 `answerable=false` |
-| POST | `/api/msds/reindex` | ADMIN | 扫描知识源目录增量落块；四元组变了就作废旧向量，然后在后台开始编码 |
+| POST | `/api/msds/reindex` | ADMIN | 扫描知识源目录增量落块；四元组变了就作废旧向量，然后提交编码任务。返回 `rebuild`、`vectors` 与 `encodeTaskId`（MQ 关闭时为 null） |
 | GET | `/api/msds/status` | ADMIN | 向量索引状态：进度、暂停原因、当前模型、元数据是否需重建、`activeVersion` / `previousVersion`；`vectorStore` / `vectorRows` / `missingRows` 给出存储实现与对账缺口（-1 表示存储不可用或对不了账） |
+| GET | `/api/msds/encode-tasks?limit=20` | ADMIN | 最近编码任务：状态、尝试次数、最后错误与时间戳；MQ 关闭时不产生新任务，列表通常为空 |
 | POST | `/api/msds/reconcile` | ADMIN | 向量库对账：把「MySQL 已编码、向量库缺失」的行补写回去；幂等，memory 模式直接返回说明 |
 | POST | `/api/msds/rollback` | ADMIN | 回滚到上一版索引：只交换 active/previous 指针，不动块；没有上一版时返回业务错误 |
 | GET | `/api/reports/stock-summary?withinDays=` | 登录 | 库存汇总（MyBatis-Plus）：按分类 + 单位给出试剂数、批次数、总量、临期量与过期量 |
 | GET | `/api/reports/flow-trend?days=` | 登录 | 出入库趋势（MyBatis-Plus）：按自然日 + 变更类型汇总，数量带符号 |
 | GET | `/actuator/health` | 公开 | 探活，返回 `{"status":"UP"}`；`/actuator/health/liveness`、`/actuator/health/readiness` 同样公开 |
-| GET | `/actuator/prometheus` | 公开 | Prometheus 抓取端点。指标含 `msds_search_seconds`（带 `degraded` 标签）、`msds_vector_encode_total`、`msds_vector_index_size`、`requisition_transition_total`（`from`/`to`）、`incompatibility_conflicts_total`（`co_stored`） |
+| GET | `/actuator/prometheus` | 公开 | Prometheus 抓取端点。指标含 `msds_search_seconds`（带 `degraded` 标签）、`msds_vector_encode_total`、`msds_vector_index_size`、`msds_encode_task_total`（`event`）/`msds_encode_task_pending`、`requisition_transition_total`（`from`/`to`）、`incompatibility_conflicts_total`（`co_stored`） |
 | GET | `/swagger-ui.html`、`/v3/api-docs` | 公开 | 交互式接口文档与 OpenAPI JSON |
 
 身份一律来自 token：申请人、审批人、操作人都不能由请求体或查询参数指定。
@@ -560,7 +591,8 @@ src/main/java/com/lazybone/hazmat/
 │                    Stocktake 盘点单 / StocktakeItem 盘点明细 / StocktakeStatus 盘点状态机
 │                    AppUser 用户 / UserRole 角色 / MsdsChunk MSDS 切块（含 hash 与 vector）
 │                    ChemicalIncompatibility 禁忌混放关系（CAS 对 + 原因 + 出处）
-├── repository/      9 个；扣减、盘点调账、开封 CAS 与状态 CAS 的关键 SQL 都在 ChemicalBatchRepository
+│                    MsdsEncodeTask 编码任务（状态机 + claim 租约）
+├── repository/      14 个；扣减、盘点调账、开封 CAS 与状态 CAS 的关键 SQL 都在 ChemicalBatchRepository
 ├── service/         StockService 入库出库与对账（核心） / RequisitionService 流程（核心）
 │                    StocktakeService 盘点建单与调账（核心） / ChemicalService
 │                    ChemicalSafetyService 台账与知识库的连接点（试剂 id → CAS → 检索）
@@ -569,6 +601,7 @@ src/main/java/com/lazybone/hazmat/
 │                    MsdsLiteralIndex 内存倒排 / MsdsQueryExpander 同义词
 │                    MsdsVectorIndex 内存向量快照 / MsdsSearchService RRF 融合
 │                    MsdsVectorService 后台编码、失败上限与四元组校验
+│                    mq/ 编码任务分发、RabbitMQ 消费/relay/DLQ 与任务状态机
 │                    SearchConcurrencyLimiter 检索并发闸门
 │                    MsdsRetrievalProperties 融合深度与权重
 │                    ai/ 云端与本地哈希 embedding 客户端、向量编解码
@@ -614,7 +647,8 @@ src/test/java/com/lazybone/hazmat/
 ├── seed/IncompatibilitySeedDataTest    种子 CAS 拼写、重复对、出处完整性、依据字段
 ├── QuantityRangeTest       四个数量入口超过 DECIMAL(12,3) 上限时被校验挡下（400 而非 500）
 ├── common/DocumentNoGeneratorTest  10 万单号并发生成不重复、格式含日期
-├── MySqlMigrationIT        MySQL 8.4 实机：Flyway V1–V10、中文往返、唯一约束与 CHECK、分页（*IT，默认不跑）
+├── MySqlMigrationIT        MySQL 8.4 实机：Flyway V1–V11、中文往返、唯一约束与 CHECK、分页（*IT，默认不跑）
+├── MsdsEncodeMqIT          RabbitMQ 实机：投递 → claim → 编码 → DONE（*IT，默认不跑，需 Docker）
 └── msds/                   MsdsChunkerTest 切块 / MsdsSearchTest 检索与增量重建
                             MsdsFusionTest 融合元数据 / MsdsSearchDegradeTest 降级
                             MsdsRetrievalEvalTest 24 题 Hit@5
@@ -630,6 +664,8 @@ src/test/java/com/lazybone/hazmat/
                             MsdsAnswerGenerationTest 引用校验：只用被引块、越界作废、拒答判定
                             MsdsGenerationEvalTest 真实生成模型 E9（默认跳过，需 Ollama + 生成端点）
                             ai/OpenAiChatAnswerClientTest 本地假服务验证请求体、5 条上限、截断、独立端点与错误映射
+                            mq/EncodeTaskServiceTest 任务复用、claim 去重、租约接管、状态迁移
+                            mq/EncodeTaskRelayTest  补发决策：可重试的发送、耗尽的转 DEAD
 ```
 
 MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设计.md](docs/msds-rag-设计.md)；

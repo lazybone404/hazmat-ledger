@@ -115,6 +115,23 @@
 		</dependency>
 
 		<!--
+			RabbitMQ：只承载 MSDS 向量编码这类可异步、可重试的旁路任务。
+
+			库存扣减、领用审批、出库、盘点确认和登录仍然走同步事务，不经过 MQ：
+			它们的正确性依赖数据库条件更新与同一事务，换成最终一致会把「账对不对」
+			变成需要补偿的分布式问题。边界见 docs/架构决策.md 的 D18。
+		-->
+		<dependency>
+			<groupId>org.springframework.boot</groupId>
+			<artifactId>spring-boot-starter-amqp</artifactId>
+		</dependency>
+		<!-- 消费端重试与退避；spring-rabbit 对它只是 optional，必须显式声明 -->
+		<dependency>
+			<groupId>org.springframework.retry</groupId>
+			<artifactId>spring-retry</artifactId>
+		</dependency>
+
+		<!--
 			运行时观测：/actuator/health 供容器与负载均衡探活，/actuator/info 暴露版本，
 			/actuator/prometheus 给指标抓取。env、heapdump 之类默认不暴露，
 			避免把配置和内存内容放出去。
@@ -183,6 +200,12 @@
 			<artifactId>mysql</artifactId>
 			<scope>test</scope>
 		</dependency>
+		<!-- RabbitMQ 集成测试（*IT）：验证真实 broker 上的投递、claim 与消费 -->
+		<dependency>
+			<groupId>org.testcontainers</groupId>
+			<artifactId>rabbitmq</artifactId>
+			<scope>test</scope>
+		</dependency>
 		<dependency>
 			<groupId>org.testcontainers</groupId>
 			<artifactId>junit-jupiter</artifactId>
@@ -211,6 +234,8 @@
 						<hazmat.security.seed-users>false</hazmat.security.seed-users>
 						<!-- 测试里不自动启动后台编码：需要验证的测试同步调用，避免后台线程与断言并发 -->
 						<hazmat.ai.encode-on-startup>false</hazmat.ai.encode-on-startup>
+						<!-- 默认套件不依赖 RabbitMQ：MQ 路径由独立 *IT 用 Testcontainers 验证 -->
+						<hazmat.mq.enabled>false</hazmat.mq.enabled>
 						<!--
 							默认不连 Redis：全部测试套件不该因为本机有没有 Redis 而红绿不同。
 							缓存逻辑由 ChemicalCacheTest 直接对 ChemicalCache 做单测（mock 掉

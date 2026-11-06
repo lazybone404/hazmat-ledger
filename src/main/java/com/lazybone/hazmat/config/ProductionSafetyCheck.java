@@ -42,6 +42,20 @@ public class ProductionSafetyCheck {
             problems.add("hazmat.security.jwt-secret 仍是开发默认值");
         }
 
+        // MQ 是可选依赖，但「打开了却连不上」会让编码任务永远停在 PENDING。
+        // 生产上宁可启动失败，也不要把一个静默不工作的队列带进运行环境。
+        if (environment.getProperty("hazmat.mq.enabled", Boolean.class, false)) {
+            if (environment.getProperty("spring.rabbitmq.host", "").isBlank()) {
+                problems.add("hazmat.mq.enabled=true 但 spring.rabbitmq.host 为空");
+            }
+            if (environment.getProperty("spring.rabbitmq.username", "").isBlank()) {
+                problems.add("hazmat.mq.enabled=true 但 spring.rabbitmq.username 为空");
+            }
+            if (environment.getProperty("spring.rabbitmq.password", "").isBlank()) {
+                problems.add("hazmat.mq.enabled=true 但 spring.rabbitmq.password 为空");
+            }
+        }
+
         if (!problems.isEmpty()) {
             throw new IllegalStateException("prod profile 配置检查未通过："
                     + String.join("；", problems)

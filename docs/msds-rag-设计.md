@@ -155,10 +155,12 @@ CREATE TABLE msds_index_meta (
   │    · hash 未变 → 复用旧 vector
   │    · hash 变了 / 新块 → 标记待编码
   │    · 旧块不存在于新文件 → 删除
-  └─ 后台单线程编码待编码块 → 回写 vector
+  └─ 提交编码任务 → 后台编码待编码块 → 回写 vector
 ```
 
 块先落库、向量后台补，理由与早期项目一致：一次 embedding 网络往返几百毫秒到数秒，不能卡住启动或保存动作；检索侧在向量未就绪时先用字面路。
+
+「提交编码任务」有两种实现，由 `hazmat.mq.enabled` 决定：默认 `false` 时仍是进程内单线程 executor；开启后写 `msds_encode_task` 并投递 RabbitMQ，见 §4.8。
 
 ### 4.3 增量粒度：块级 hash
 
@@ -198,7 +200,7 @@ CREATE TABLE msds_index_meta (
 并发与资源边界（审查后补）：
 
 - **重建锁必须包住整个事务。** `rebuild` 是「查旧块 → 删 stale → 插新块」的读改写，两个请求同时进来会各自看到同一份旧快照、各插一份。用 `TransactionTemplate` 把事务放进 `ReentrantLock` 内层，而不是给方法加 `@Transactional`——后者的提交发生在代理返回之后，方法体内 `unlock` 时另一个线程仍读不到已提交数据。锁只在单实例内有效，多实例要靠数据库唯一约束或分布式锁。
-- **编码线程池的队列有界（容量 8）。** `reindex` 现在限 ADMIN，但账号泄露或脚本循环调用仍可能堆积任务；无界队列会一直涨到堆耗尽。队列满时丢弃并记日志；丢弃是安全的，因为排队中的任务会按最新库状态重新取待编码块。
+- **本地编码线程池的队列有界（容量 8）。** 仅在 `hazmat.mq.enabled=false` 时使用。`reindex` 现在限 ADMIN，但账号泄露或脚本循环调用仍可能堆积任务；无界队列会一直涨到堆耗尽。队列满时丢弃并记日志；丢弃是安全的，因为排队中的任务会按最新库状态重新取待编码块。开启 MQ 后由任务表承担排队，这条本地队列不再参与。
 - **重建与编码并发是最终一致。** 重建清空旧向量时，正在请求中的那一批仍可能写回旧模型向量。这些块的模型名与元数据不符，下一轮编码会识别并重算，不会被当作可用向量。让 `reindex` 等几十秒的模型调用结束更糟。
 - **显式重建只写变更行。** 288 块通常只有少数带失败记录，`prepareForReindex` 收集真正发生变化的块再 `saveAll`，避免每次重建都全表写回。
 
@@ -271,6 +273,76 @@ index_version = v{chunkVersion}-{modelSafe}-{dim}-{epochMillis}
 - 新版本切过去时向量还没编码，这段时间新块只能靠字面路召回；编码完成后向量路才完整。
 - 两版块在库里并存，存储短暂翻倍；块数量级（当前 302）可接受，10 万级需要重新评估保留策略。
 - 回滚不重新编码，切回的旧版本沿用旧向量；若四元组已变，`/status` 仍会提示需要重建。
+
+### 4.8 编码任务队列（RabbitMQ）
+
+`hazmat.mq.enabled=true` 时，编码从「进程内线程池」换成「数据库任务表 + RabbitMQ 唤醒信号」：
+
+```
+reindex / 启动补编码
+  → msds_encode_task 插入或复用 PENDING（同一 index_version 只保留一个未完成任务）
+  → 投递 {taskId}（持久化消息）
+  → 消费端条件 UPDATE claim：PENDING/FAILED → RUNNING，attempts + 1
+  → 版本仍是 active 才执行 encodePending(indexVersion)
+  → DONE / FAILED / DEAD
+```
+
+**任务状态**
+
+| 状态 | 含义 | 后续 |
+|---|---|---|
+| `PENDING` | 已创建，尚未被消费 | relay 发现超过最小年龄仍未推进就重发 |
+| `RUNNING` | 已被某实例 claim | 只有 `claimed_at` 超过租约才允许其它实例接管 |
+| `DONE` | 编码完成，或版本已切换被跳过 | 终态；跳过原因留在 `last_error` |
+| `FAILED` | 本轮失败，还有重试次数 | 重新 claim 时 `attempts` 累加；relay 也会补发 |
+| `DEAD` | 重试耗尽、编码已持久化暂停、需人工重建 | 终态；消息进 DLQ |
+
+**消费与重试**
+
+- 第一步永远是条件 UPDATE claim。重复投递（at-least-once、relay 补发、崩溃重投）
+  抢不到任务就直接 ack，不调用模型；这是去重的唯一依据，不依赖消息 id 去重表。
+- 任务版本与当前 `activeVersion` 不一致时标 `DONE` 并记原因，避免旧任务编码新版本。
+- 本轮有块编码失败：先标 `FAILED` 再抛异常，让 Spring Retry 的下一次尝试能重新 claim；
+  否则任务停在 `RUNNING`，租约未过期前谁也接不了。退避默认 2s、4s，最多 10s。
+- 重试耗尽由 `EncodeTaskMessageRecoverer` 标 `DEAD`，抛 `AmqpRejectAndDontRequeueException`
+  进 `hazmat.msds.encode.dlq`；`default-requeue-rejected=false`，坏消息不会无限回队。
+- 编码已持久化暂停、单块失败达到上限、四元组需重建：直接 `DEAD`，等人工 reindex，
+  不自动重试——这些不是瞬时故障，重试只会重复烧模型额度。
+
+**补发（relay）**
+
+`EncodeTaskRelay` 每 30 秒扫两类任务：`PENDING`/`FAILED` 且 `updated_at` 超过 10 秒未推进；
+`RUNNING` 且 `claimed_at` 超过租约（默认 10 分钟，可覆盖实例崩溃）。还有重试次数的重发，
+次数已耗尽的直接转 `DEAD`，避免制造永远抢不到的死循环消息。发送失败只记日志和指标，
+任务保持 `PENDING`，下一轮继续补。
+
+**可靠性的边界**
+
+- MQ 只保证「消息最终会送到」，不保证只送一次；正确性由数据库条件更新与
+  `needsEncoding` 的幂等共同保证。
+- 崩溃可能重复调用模型：已完成块会跳过，重复窗口是「模型已返回、尚未落库」。
+- broker 不可用时应用照常启动，任务留 `PENDING`，检索继续用旧向量；
+  `/actuator/health` 不因 RabbitMQ DOWN 而失败（`management.health.rabbit.enabled=false`），
+  任务积压看 `msds_encode_task_pending` 与 `/api/msds/encode-tasks`。
+- 多实例同时 `reindex` 仍受 JVM 内 `rebuildLock` 限制；本次只解决编码任务重复执行。
+
+**配置**
+
+```properties
+hazmat.mq.enabled=false                 # 默认关；Docker Compose 默认开
+hazmat.mq.encode.exchange=hazmat.msds
+hazmat.mq.encode.queue=hazmat.msds.encode
+hazmat.mq.encode.routing-key=msds.encode
+hazmat.mq.encode.dlx=hazmat.msds.dlx
+hazmat.mq.encode.dlq=hazmat.msds.encode.dlq
+hazmat.mq.encode.max-attempts=3
+hazmat.mq.encode.claim-lease-ms=600000
+hazmat.mq.encode.relay-interval-ms=30000
+hazmat.mq.encode.relay-min-age-ms=10000
+```
+
+`hazmat.mq.enabled=false` 时只装配 `LocalEncodeTaskDispatcher`，行为与之前完全一致：
+`reindex` 仍委托本地 executor，`/encode-tasks` 返回空列表，`encodeTaskId` 为 null。
 
 ## 5. 检索
 
@@ -399,8 +471,9 @@ query ──┬─→ 字面检索（内存倒排，字 + 双字） → top 50
 | 方法 | 路径 | 阶段 | 说明 |
 |---|---|---|---|
 | GET | `/api/msds/search?q=...&casNo=...&docType=...&topK=5` | 3（已实现） | 字面 + 向量 RRF 融合，返回 `MsdsSearchResult`（命中列表 + 降级/索引状态）。`docType` 可选值 `MSDS`/`GB`/`SOP`，不传则三类一起检索；每条命中带 `docType` 与 `clauseNo` |
-| POST | `/api/msds/reindex` | 1–2（已实现） | 扫文件增量落块，按四元组决定是否作废旧向量，后台开始编码；返回 `rebuild` 与 `vectors` 两段 |
+| POST | `/api/msds/reindex` | 1–2（已实现） | 扫文件增量落块，按四元组决定是否作废旧向量，提交编码任务；返回 `rebuild`、`vectors` 与 `encodeTaskId`（MQ 关闭时为 null） |
 | GET | `/api/msds/status` | 2（已实现） | 索引状态：块数、已编码、待编码、已放弃、暂停原因、模型与维度、四元组是否一致、是否在编码 |
+| GET | `/api/msds/encode-tasks?limit=20` | 2（已实现） | 最近编码任务：`id` / `indexVersion` / `status` / `attempts` / `maxAttempts` / `lastError` / `createdAt` / `updatedAt` / `finishedAt`。MQ 关闭时不产生新任务，列表通常为空 |
 | GET | `/api/msds/ask?q=...&casNo=...&topK=5` | 4（已实现） | 检索 + 生成，返回 `MsdsAnswer`（回答、引用、降级/拒答状态）；模型只看到前 5 条 |
 
 过滤参数用 `casNo` 而不是 `chemicalId`：MSDS 按 CAS 号组织，而 `chemical_id` 允许为空（档案可能晚于索引落库），用档案 ID 过滤会在“文件已索引、档案未灌”时直接查不到。CAS 号是两份数据的共同键。
@@ -549,6 +622,7 @@ query ──┬─→ 字面检索（内存倒排，字 + 双字） → top 50
 - 配置开关 `hazmat.ai.enabled`，默认 `false`。关闭时所有接口仍可用，只是走纯字面 + 本地哈希、不生成。
 - 开启后，MSDS 正文会发送到云端 embedding / chat 服务；状态接口和启动日志要明确提示这一点。
 - 失败上限、四元组校验、显式降级三条不因「数据量小、成本低」而省略——它们防的是故障时的行为，不是账单。
+- 编码任务队列开关 `hazmat.mq.enabled`，默认 `false`：不装 broker 也能开发与跑默认测试。开启后只有编码进 MQ，库存与台账写入仍在同步事务里，broker 故障不影响这些接口。
 
 实际配置（`application.properties`，前缀 `hazmat.ai`）：
 

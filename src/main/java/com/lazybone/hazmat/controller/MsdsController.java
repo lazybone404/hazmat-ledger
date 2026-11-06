@@ -10,12 +10,17 @@ import com.lazybone.hazmat.msds.MsdsIndexService;
 import com.lazybone.hazmat.msds.MsdsSearchService;
 import com.lazybone.hazmat.msds.MsdsVectorService;
 import com.lazybone.hazmat.msds.SearchFilter;
+import com.lazybone.hazmat.msds.mq.EncodeTaskDispatcher;
+import com.lazybone.hazmat.msds.mq.EncodeTaskService;
+import com.lazybone.hazmat.msds.mq.EncodeTaskView;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
 
 /**
  * MSDS 安全问答：检索原文、生成带引用的回答、手动重建索引。
@@ -31,15 +36,21 @@ public class MsdsController {
     private final MsdsAnswerService answerService;
     private final MsdsIndexService indexService;
     private final MsdsVectorService vectorService;
+    private final EncodeTaskDispatcher encodeTaskDispatcher;
+    private final EncodeTaskService encodeTaskService;
 
     public MsdsController(MsdsSearchService searchService,
                           MsdsAnswerService answerService,
                           MsdsIndexService indexService,
-                          MsdsVectorService vectorService) {
+                          MsdsVectorService vectorService,
+                          EncodeTaskDispatcher encodeTaskDispatcher,
+                          EncodeTaskService encodeTaskService) {
         this.searchService = searchService;
         this.answerService = answerService;
         this.indexService = indexService;
         this.vectorService = vectorService;
+        this.encodeTaskDispatcher = encodeTaskDispatcher;
+        this.encodeTaskService = encodeTaskService;
     }
 
     /**
@@ -89,8 +100,22 @@ public class MsdsController {
     public ApiResponse<MsdsReindexResult> reindex() {
         MsdsIndexService.RebuildResult rebuild = indexService.rebuild();
         MsdsVectorService.ResetResult vectors = vectorService.prepareForReindex();
-        vectorService.scheduleEncoding();
-        return ApiResponse.ok(new MsdsReindexResult(rebuild, vectors));
+        EncodeTaskView task = encodeTaskDispatcher.requestEncoding(
+                vectorService.activeVersion(), "reindex");
+        return ApiResponse.ok(new MsdsReindexResult(
+                rebuild, vectors, task == null ? null : task.id()));
+    }
+
+    /**
+     * 最近的编码任务。MQ 关闭时没有任务行，返回空列表。
+     *
+     * <p>限 ADMIN：任务里能看到失败原因与索引版本，属于运维信息。
+     */
+    @GetMapping("/encode-tasks")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ApiResponse<List<EncodeTaskView>> encodeTasks(
+            @RequestParam(value = "limit", defaultValue = "20") int limit) {
+        return ApiResponse.ok(encodeTaskService.recent(limit));
     }
 
     /** 向量索引状态：进度、暂停原因、模型与四元组是否一致。限 ADMIN。 */
