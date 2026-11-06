@@ -42,3 +42,7 @@ build/
 .codegraph/
 __pycache__/
 *.pyc
+
+### 本地个人材料 ###
+# 仅本机保留，不提交、不推送；不要在任何已跟踪文档中链接
+docs/local/

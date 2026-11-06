@@ -634,8 +634,7 @@ src/test/java/com/lazybone/hazmat/
 
 MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设计.md](docs/msds-rag-设计.md)；
 架构取舍与「什么条件下会改主意」见 [docs/架构决策.md](docs/架构决策.md)；
-实验数字与复现命令见 [docs/实验记录.md](docs/实验记录.md)；
-面试素材卡与追问答法见 [docs/面试准备.md](docs/面试准备.md)。
+实验数字与复现命令见 [docs/实验记录.md](docs/实验记录.md)。
 
 ---
 
