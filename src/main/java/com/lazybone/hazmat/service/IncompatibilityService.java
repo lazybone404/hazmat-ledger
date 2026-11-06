@@ -11,6 +11,7 @@ import com.lazybone.hazmat.entity.ChemicalIncompatibility;
 import com.lazybone.hazmat.repository.ChemicalBatchRepository;
 import com.lazybone.hazmat.repository.ChemicalIncompatibilityRepository;
 import com.lazybone.hazmat.repository.ChemicalRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -54,15 +55,33 @@ public class IncompatibilityService {
     private final ChemicalRepository chemicalRepository;
     private final ChemicalBatchRepository batchRepository;
     private final ChemicalService chemicalService;
+    private final MeterRegistry meterRegistry;
 
     public IncompatibilityService(ChemicalIncompatibilityRepository ruleRepository,
                                   ChemicalRepository chemicalRepository,
                                   ChemicalBatchRepository batchRepository,
-                                  ChemicalService chemicalService) {
+                                  ChemicalService chemicalService,
+                                  MeterRegistry meterRegistry) {
         this.ruleRepository = ruleRepository;
         this.chemicalRepository = chemicalRepository;
         this.batchRepository = batchRepository;
         this.chemicalService = chemicalService;
+        this.meterRegistry = meterRegistry;
+    }
+
+    /**
+     * 禁配命中计数：{@code co_stored=true} 是同柜违规，{@code false} 是分柜存放。
+     *
+     * 两者分开计数而不是只数「冲突」：同柜违规的量级是安全事件，
+     * 分柜命中的量级是「规则生效但没出事」，合成一个数就看不出前者有没有变多。
+     */
+    private void countRuleHits(int coStored, int separated) {
+        if (coStored > 0) {
+            meterRegistry.counter("incompatibility.conflicts", "co_stored", "true").increment(coStored);
+        }
+        if (separated > 0) {
+            meterRegistry.counter("incompatibility.conflicts", "co_stored", "false").increment(separated);
+        }
     }
 
     /** 全实验室混放检查：只比对当前还有实物库存的试剂 */
@@ -102,6 +121,7 @@ public class IncompatibilityService {
             }
         }
 
+        countRuleHits(conflicts.size(), separated.size());
         int pairCount = stock.size() * (stock.size() - 1) / 2;
         return IncompatibilityReport.of(
                 stock.size(), snapshot.distinctLocationCount(), pairCount, coStoredPairs,
@@ -149,6 +169,7 @@ public class IncompatibilityService {
                 separated.add(IncompatibilityView.of(chemical, partner, shared, rule));
             }
         }
+        countRuleHits(conflicts.size(), separated.size());
         return ChemicalIncompatibilityView.of(
                 ChemicalRef.from(chemical), mine, pairCount, coStoredPairs,
                 conflicts, separated, uncovered, coStoredUncovered);

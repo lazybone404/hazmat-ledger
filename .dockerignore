@@ -12,3 +12,5 @@ README.md
 tools/
 compose.yaml
 .dockerignore
+# 真实环境变量不进构建上下文：镜像层里的文件即使后续删除也留在历史里
+.env

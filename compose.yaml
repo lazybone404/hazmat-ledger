@@ -1,23 +1,30 @@
 # =====================================================================
-# 本地容器化部署：应用 + MySQL。
+# 本地容器化部署：应用 + MySQL（+ 可选 pgvector）。
 #
+#   cp .env.example .env         # 先填 DB_PASSWORD 与 HAZMAT_JWT_SECRET
 #   docker compose up -d --build
 #   curl http://localhost:8090/actuator/health
 #   docker compose down          # 保留数据卷
 #   docker compose down -v       # 连数据一起删
 #
+# 向量库（B3 之后可用）：
+#   docker compose --profile pgvector up -d
+#
 # 只想用 H2 跑（不启动 MySQL）：
 #   docker build -t hazmat-ledger:local .
-#   docker run --rm -p 8090:8090 hazmat-ledger:local
+#   docker run --rm -p 8090:8090 -e HAZMAT_JWT_SECRET=<至少32字节> hazmat-ledger:local
 #
-# 下面的密码与 JWT 密钥都是演示值，不要直接用于任何公开环境。
+# 所有密钥都从 .env 读；没有 .env 时用下面的演示默认值，只够本机跑通，
+# 不要直接用于任何公开环境。真实值绝不写进这个文件。
 # =====================================================================
 services:
   mysql:
     image: mysql:8.4
     environment:
-      MYSQL_ROOT_PASSWORD: root-demo-password
-      MYSQL_DATABASE: hazmat
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root-demo-password}
+      MYSQL_DATABASE: ${DB_NAME:-hazmat}
+      MYSQL_USER: ${DB_USERNAME:-hazmat}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-hazmat-demo-password}
     ports:
       # 映射到 3307，避免与本机已有的 MySQL（3306）冲突
       - "3307:3306"
@@ -32,25 +39,68 @@ services:
       timeout: 3s
       retries: 20
       start_period: 20s
+    # 数据库长期占用约 400MB；给足余量但不让它把宿主拖垮
+    mem_limit: 1g
+
+  # pgvector：只存「块 id → 向量」这份可重建的派生数据，MySQL 仍是事实源。
+  # 放在 profile 里：不跑向量库的演示不必为它多起一个容器。
+  pgvector:
+    image: pgvector/pgvector:pg16
+    profiles: ["pgvector"]
+    environment:
+      POSTGRES_DB: ${PG_VECTOR_DB:-hazmat_vectors}
+      POSTGRES_USER: ${PG_VECTOR_USER:-hazmat}
+      POSTGRES_PASSWORD: ${PG_VECTOR_PASSWORD:-hazmat-demo-password}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgvector-data:/var/lib/postgresql/data
+      # 首次建库时执行：扩展、表、HNSW 与过滤索引
+      - ./docker/pgvector/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    mem_limit: 512m
 
   app:
     build: .
     depends_on:
       mysql:
         condition: service_healthy
+      # 只有启用 pgvector profile 时才存在；required: false 让默认演示不因它缺失而起不来
+      pgvector:
+        condition: service_healthy
+        required: false
     environment:
       SPRING_PROFILES_ACTIVE: mysql
-      # 容器里用服务名 mysql，而不是 profile 文件里的 localhost。
-      # 用户名与密码直接覆盖 datasource 配置，不经过 profile 里的占位符。
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/hazmat?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
-      SPRING_DATASOURCE_USERNAME: root
-      SPRING_DATASOURCE_PASSWORD: root-demo-password
-      HAZMAT_JWT_SECRET: docker-demo-secret-change-me-0123456789abcdef
-      HAZMAT_SEED_PASSWORD: ChangeMe123!
+      # 容器里用服务名 mysql，而不是 profile 文件里的 localhost
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${DB_NAME:-hazmat}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true
+      SPRING_DATASOURCE_USERNAME: ${DB_USERNAME:-hazmat}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-hazmat-demo-password}
+      # 必填：缺失时 compose 直接报错并指名字段，而不是起一个没有签名的应用
+      HAZMAT_JWT_SECRET: ${HAZMAT_JWT_SECRET:?请先 cp .env.example .env 并设置 HAZMAT_JWT_SECRET}
+      HAZMAT_SEED_PASSWORD: ${HAZMAT_SEED_PASSWORD:-ChangeMe123!}
+      HAZMAT_VECTOR_STORE: ${HAZMAT_VECTOR_STORE:-memory}
       # 容器日志里不需要每条 SQL
       JPA_SHOW_SQL: "false"
+      # 容器内总内存按 limits 的 75% 给堆，和 Dockerfile 的 MaxRAMPercentage 一致
+      JAVA_OPTS: "-XX:MaxRAMPercentage=75"
     ports:
       - "8090:8090"
+    healthcheck:
+      # 用 readiness 而不是 liveness：只有数据库连上、迁移跑完，才该接流量
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8090/actuator/health/readiness"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 40s
+    mem_limit: 1g
+    # 优雅停机：给手上的请求留时间，与 server.shutdown=graceful 配套
+    stop_grace_period: 30s
 
 volumes:
   mysql-data:
+  pgvector-data:

@@ -11,6 +11,7 @@ import com.lazybone.hazmat.entity.RequisitionStatus;
 import com.lazybone.hazmat.repository.ChemicalRepository;
 import com.lazybone.hazmat.repository.RequisitionLogRepository;
 import com.lazybone.hazmat.repository.RequisitionRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.persistence.criteria.Predicate;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.OptimisticLockingFailureException;
@@ -71,6 +72,7 @@ public class RequisitionService {
     private final RequisitionLogRepository logRepository;
     private final ChemicalRepository chemicalRepository;
     private final StockService stockService;
+    private final MeterRegistry meterRegistry;
 
     /**
      * 审批的事务边界由模板显式控制，不再用 {@code @Transactional}。原因见 {@link #review}：
@@ -82,12 +84,14 @@ public class RequisitionService {
                               RequisitionLogRepository logRepository,
                               ChemicalRepository chemicalRepository,
                               StockService stockService,
-                              PlatformTransactionManager transactionManager) {
+                              PlatformTransactionManager transactionManager,
+                              MeterRegistry meterRegistry) {
         this.requisitionRepository = requisitionRepository;
         this.logRepository = logRepository;
         this.chemicalRepository = chemicalRepository;
         this.stockService = stockService;
         this.reviewTx = new TransactionTemplate(transactionManager);
+        this.meterRegistry = meterRegistry;
     }
 
     /** 申请详情：申请本身 + 完整流转时间线。台账要能回答「这步谁做的、什么理由」 */
@@ -353,8 +357,22 @@ public class RequisitionService {
         }
     }
 
+    /**
+     * 写流转日志，并顺带计一次「状态迁移」。
+     *
+     * 计数点是这里而不是各个业务方法：所有状态变化都必须经过 {@code record}，
+     * 单独在 submit/review/issue 里各加一次，迟早会漏掉新增的动作（撤回就是这么来的）。
+     * {@code from} 为空表示新建申请，用 {@code NEW} 作起点，避免 tag 出现空串。
+     *
+     * 已知边界：计数发生在事务提交前，若随后事务回滚，指标仍会 +1。
+     * 指标用于看趋势而非对账，接受这点偏差，换取埋点集中在一处。
+     */
     private void record(Long requisitionId, RequisitionStatus from, RequisitionStatus to,
                         String operator, String comment) {
+        meterRegistry.counter("requisition.transition",
+                        "from", from == null ? "NEW" : from.name(),
+                        "to", to.name())
+                .increment();
         logRepository.save(RequisitionLog.builder()
                 .requisitionId(requisitionId)
                 .fromStatus(from)

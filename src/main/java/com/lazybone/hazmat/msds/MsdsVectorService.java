@@ -14,6 +14,7 @@ import com.lazybone.hazmat.msds.vector.VectorFilter;
 import com.lazybone.hazmat.msds.vector.VectorStore;
 import com.lazybone.hazmat.repository.MsdsChunkRepository;
 import com.lazybone.hazmat.repository.MsdsIndexMetaRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,6 +62,7 @@ public class MsdsVectorService {
     private final HashingEmbeddingClient localClient;
     private final HttpEmbeddingClient remoteClient;
     private final VectorStore vectorStore;
+    private final MeterRegistry meterRegistry;
 
     /**
      * 单线程足够：几百块，串行反而好排查；也避免并发写同一行块。
@@ -84,13 +86,21 @@ public class MsdsVectorService {
                              AiProperties properties,
                              HashingEmbeddingClient localClient,
                              HttpEmbeddingClient remoteClient,
-                             VectorStore vectorStore) {
+                             VectorStore vectorStore,
+                             MeterRegistry meterRegistry) {
         this.chunkRepository = chunkRepository;
         this.metaRepository = metaRepository;
         this.properties = properties;
         this.localClient = localClient;
         this.remoteClient = remoteClient;
         this.vectorStore = vectorStore;
+        this.meterRegistry = meterRegistry;
+        // 当前可检索块数。计划里的 msds.index.active.version 要到 B4 有 active_version
+        // 之后才有意义，这里先暴露「索引有多大」：它下降通常意味着重建把索引删空了。
+        io.micrometer.core.instrument.Gauge
+                .builder("msds.vector.index.size", this, service -> service.chunkSnapshot.size())
+                .description("当前向量索引里的块数量")
+                .register(meterRegistry);
     }
 
     /** 本轮编码的结果，写日志与状态接口都用它 */
@@ -305,12 +315,17 @@ public class MsdsVectorService {
                     chunkRepository.saveAll(batch);
                     encoded += batch.size();
                     consecutiveFailures = 0;
+                    meterRegistry.counter("msds.vector.encode", "result", "encoded")
+                            .increment(batch.size());
                 } catch (AiUnavailableException e) {
                     failed += batch.size();
                     consecutiveFailures += batch.size();
                     recordFailure(batch, e.getMessage());
+                    meterRegistry.counter("msds.vector.encode", "result", "failed")
+                            .increment(batch.size());
                     log.warn("MSDS 块编码失败（本批 {} 块）: {}", batch.size(), e.getMessage());
                     if (consecutiveFailures >= properties.getMaxConsecutiveFailures()) {
+                        meterRegistry.counter("msds.vector.encode", "result", "paused").increment();
                         pause(meta, "连续 " + consecutiveFailures + " 块编码失败：" + e.getMessage());
                         log.warn("向量编码暂停：连续 {} 块失败，原因 {}", consecutiveFailures, e.getMessage());
                         return new EncodeResult(pending.size(), encoded, failed, true, quad.modelId());

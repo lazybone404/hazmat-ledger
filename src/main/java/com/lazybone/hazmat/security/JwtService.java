@@ -48,6 +48,8 @@ public class JwtService {
                 .subject(user.getUsername())
                 .claim("roles", List.of(user.getRole().name()))
                 .claim("displayName", user.getDisplayName())
+                // 撤销版本：库里自增后，旧 token 的 tv 对不上，过滤器直接判 401
+                .claim("tv", user.getTokenVersion())
                 .build();
 
         String token = encoder.encode(JwtEncoderParameters.from(

@@ -102,12 +102,19 @@
 		</dependency>
 
 		<!--
-			运行时观测：/actuator/health 供容器与负载均衡探活，/actuator/info 暴露版本。
-			只开这两个端点；env、heapdump 之类默认不暴露，避免把配置和内存内容放出去。
+			运行时观测：/actuator/health 供容器与负载均衡探活，/actuator/info 暴露版本，
+			/actuator/prometheus 给指标抓取。env、heapdump 之类默认不暴露，
+			避免把配置和内存内容放出去。
 		-->
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-actuator</artifactId>
+		</dependency>
+		<!-- Prometheus 指标格式；不引这个依赖时只有 health/info 与 JSON metrics -->
+		<dependency>
+			<groupId>io.micrometer</groupId>
+			<artifactId>micrometer-registry-prometheus</artifactId>
+			<scope>runtime</scope>
 		</dependency>
 
 		<!--

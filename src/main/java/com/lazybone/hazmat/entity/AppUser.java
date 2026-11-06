@@ -58,8 +58,7 @@ public class AppUser {
 
     /**
      * 停用而不是删除：台账里的签名还要能追溯。
-     * 停用后登录被拒，已签发的 token 在过期前仍然有效——这是无状态 JWT 的已知代价，
-     * 文档里写清楚，真要即时踢下线需要引入黑名单，本项目不做。
+     * 停用后登录被拒，已签发的 token 通过 {@link #tokenVersion} 自增立即失效。
      */
     @Builder.Default
     @Column(nullable = false)
@@ -67,6 +66,14 @@ public class AppUser {
 
     @Column(nullable = false, updatable = false)
     private LocalDateTime createdAt;
+
+    /**
+     * JWT 撤销版本。停用、改密、改角色时自增；token 里带着签发时的值，
+     * 校验过滤器发现不一致就拒绝。默认 0 兼容历史数据。
+     */
+    @Builder.Default
+    @Column(name = "token_version", nullable = false)
+    private int tokenVersion = 0;
 
     @PrePersist
     public void prePersist() {
