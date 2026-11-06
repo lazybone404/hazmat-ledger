@@ -5,6 +5,7 @@ import com.lazybone.hazmat.msds.ai.EmbeddingClient;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 向量存储抽象：内存暴力扫描与 pgvector 两种实现共用同一套调用。
@@ -33,9 +34,25 @@ public interface VectorStore {
     /** 按相似度降序返回至多 {@code limit} 条；{@code minScore} 以下的命中应被丢弃 */
     List<ScoredChunk> search(float[] query, VectorFilter filter, int limit, double minScore);
 
+    /** 是否支持按块增量写入。内存实现每次都从库全量重建，不需要它 */
+    default boolean supportsIncrementalWrites() {
+        return false;
+    }
+
     /** 增量写入或覆盖同 id 的记录；pgvector 实现按 chunk_id 做 upsert */
     default void upsert(List<VectorRecord> records) {
         throw new UnsupportedOperationException(name() + " 不支持增量写入，请用 refresh 全量重建");
+    }
+
+    /**
+     * 给定块 id 里，哪些已经在存储中。
+     *
+     * <p>用于对账：MySQL 是事实源，它认为「已编码」的块如果不在 pg 里，
+     * 就是一次写入失败留下的缺口。返回空集表示「一个都没有」，不是「不支持」——
+     * 不支持时抛 {@link UnsupportedOperationException}。
+     */
+    default Set<Long> existingIds(Collection<Long> chunkIds) {
+        throw new UnsupportedOperationException(name() + " 不支持按 id 查询");
     }
 
     /** 删除指定索引版本的向量；B4 版本切换后清理旧版本用 */

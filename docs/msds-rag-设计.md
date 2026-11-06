@@ -142,7 +142,9 @@ CREATE TABLE msds_index_meta (
 
 `msds_index_meta` 是「这批向量属于谁」的身份证。模型、维度、切块规则任一不符，向量路整体停用，不混用旧向量——不同模型算出的向量不在同一个空间，余弦算得出数但排序没有意义。
 
-向量存储通过 `hazmat.vector.store` 选择实现：默认 `memory`（进程内暴力余弦，复用 `MsdsVectorIndex`），`pgvector` 由 B3 接入。检索服务只依赖 `VectorStore` 接口，存储层只回「块 id + 分数」，正文按 id 回表，避免向量库和事实源出现两份内容。
+向量存储通过 `hazmat.vector.store` 选择实现：默认 `memory`（进程内暴力余弦，复用 `MsdsVectorIndex`），
+`pgvector` 把向量与过滤字段下沉到 PostgreSQL（B3 已落地）。检索服务只依赖 `VectorStore` 接口，
+存储层只回「块 id + 分数」，正文按 id 回表，避免向量库和事实源出现两份内容。
 
 ### 4.2 写入：块先落库，向量后补
 
@@ -199,6 +201,41 @@ CREATE TABLE msds_index_meta (
 - **编码线程池的队列有界（容量 8）。** `reindex` 现在限 ADMIN，但账号泄露或脚本循环调用仍可能堆积任务；无界队列会一直涨到堆耗尽。队列满时丢弃并记日志；丢弃是安全的，因为排队中的任务会按最新库状态重新取待编码块。
 - **重建与编码并发是最终一致。** 重建清空旧向量时，正在请求中的那一批仍可能写回旧模型向量。这些块的模型名与元数据不符，下一轮编码会识别并重算，不会被当作可用向量。让 `reindex` 等几十秒的模型调用结束更糟。
 - **显式重建只写变更行。** 288 块通常只有少数带失败记录，`prepareForReindex` 收集真正发生变化的块再 `saveAll`，避免每次重建都全表写回。
+
+### 4.6 pgvector 存储（B3）
+
+只有 `hazmat.vector.store=pgvector` 时装配；默认 `memory`，行为与之前一致。
+
+表结构（`docker/pgvector/init.sql` 与启动时的幂等 `CREATE TABLE IF NOT EXISTS` 双保险）：
+
+```sql
+CREATE TABLE msds_vector (
+    chunk_id      BIGINT PRIMARY KEY,
+    cas_no        VARCHAR(32),
+    doc_type      VARCHAR(16),
+    index_version VARCHAR(64),
+    model_id      VARCHAR(64),
+    embedding     vector(1024) NOT NULL,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX ON msds_vector USING hnsw (embedding vector_cosine_ops) WITH (m=16, ef_construction=64);
+CREATE INDEX ON msds_vector (index_version, doc_type, cas_no);
+```
+
+- **只建第二个 DataSource，不建第二个 JPA EMF。** 多一个 EMF 会多一个事务管理器，而两库本来
+  就没有分布式事务；`PgVectorStore` 自己持有 Hikari 池，`destroyMethod="close"` 在停机时释放。
+- **正文不搬。** pg 只回答「哪几块最像」，服务层按块 id 回表拿最新正文；修 MSDS 文字不需要重建向量库。
+- **写入顺序。** 编码成功先 `saveAll` MySQL，再 `upsert` pg；pg 失败只记指标，不把整批判成编码失败。
+  缺口由 `POST /api/msds/reconcile` 补写：按 MySQL「已编码」集合查 `existingIds`，差的批量 upsert。
+- **检索 SQL。** `score = 1 - (embedding <=> $query)`，`WHERE score >= minScore`，可选
+  `cas_no` / `doc_type` / `index_version` 过滤，`ORDER BY embedding <=> $query LIMIT depth`。
+  过滤放在 SQL 里而不是回到内存筛，避免「先取 50 条再过滤」在过滤条件苛刻时召回为空。
+- **可用性。** `initializationFailTimeout(-1)` + 5 秒缓存探活；pg 不可用时 `search` 返回空、
+  `/status` 的 `vectorRows=-1`、向量路置 `degraded`，字面路不受影响。
+- **维度校验。** 写入前校验向量长度与 `hazmat.vector.pg.dimension`；本地哈希 512 维写 pg 会被拒绝，
+  这是有意的——混入不同空间的向量比报错更难排查。
+- **状态。** `/api/msds/status` 追加 `vectorStore`（memory/pgvector）、`vectorRows`（不可用时 -1）、
+  `missingRows`（MySQL 已编码但 pg 缺失的行数，-1 表示对账未执行）。
 
 ## 5. 检索
 

@@ -99,4 +99,16 @@ public class MsdsController {
     public ApiResponse<MsdsIndexStatus> status() {
         return ApiResponse.ok(vectorService.status());
     }
+
+    /**
+     * 向量库对账：把「MySQL 已编码、向量库缺失」的行补写回去。
+     *
+     * 幂等，可重复调用；memory 模式没有缺口，直接返回说明。
+     * 限 ADMIN——它会触发对向量库的批量写入。
+     */
+    @PostMapping("/reconcile")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ApiResponse<MsdsVectorService.ReconcileResult> reconcile() {
+        return ApiResponse.ok(vectorService.reconcile());
+    }
 }

@@ -14,6 +14,10 @@ import java.time.LocalDateTime;
  * {@code encoded + pending + failed} 等于 {@code chunks}：三态互斥，不重叠。
  * {@code failed} 是「失败次数已达上限、不再自动重试」的块，普通失败仍算在
  * {@code pending} 里，下一轮会再试。
+ *
+ * 最后一组是存储视图：{@code vectorStore} 为当前实现（memory / pgvector），
+ * {@code vectorRows} 为存储里的行数（不可用时为 -1），{@code missingRows} 为
+ * 「MySQL 已编码但存储里没有」的行数（-1 表示对账未执行或对不了账）。
  */
 public record MsdsIndexStatus(
         int chunks,
@@ -30,5 +34,8 @@ public record MsdsIndexStatus(
         boolean metadataReady,
         boolean needsRebuild,
         String rebuildReason,
-        boolean encodingInProgress) {
+        boolean encodingInProgress,
+        String vectorStore,
+        long vectorRows,
+        int missingRows) {
 }
