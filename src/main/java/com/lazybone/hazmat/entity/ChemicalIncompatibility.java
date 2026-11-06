@@ -2,6 +2,8 @@ package com.lazybone.hazmat.entity;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
@@ -55,9 +57,31 @@ public class ChemicalIncompatibility {
     @Column(nullable = false, length = 500)
     private String reason;
 
-    /** 依据出处，如「MSDS 7722-64-7 第10节 禁配物」 */
+    /** 依据出处，如「MSDS 7722-64-7 第10节 禁配物」——人读的摘要，结构化依据在下面 */
     @Column(nullable = false, length = 300)
     private String source;
+
+    /** 结构化依据来源：MSDS / GB。程序化创建默认 MSDS，避免 NOT NULL 违约 */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "source_type", nullable = false, length = 16)
+    private IncompatibilitySourceType sourceType;
+
+    /** 依据文档标识，如「MSDS 7722-64-7 / MSDS 7647-01-0」 */
+    @Column(name = "source_doc", length = 200)
+    private String sourceDoc;
+
+    /** 条款位置，如「第10节 稳定性和反应性·禁配物」 */
+    @Column(name = "source_clause", length = 64)
+    private String sourceClause;
+
+    /** 依据原文摘录，用于前端直接展示，不需要再打开 MSDS */
+    @Column(name = "source_excerpt", length = 1000)
+    private String sourceExcerpt;
+
+    /** 核实状态：VERIFIED 才算有依据；PENDING 是「有规则但未核实」 */
+    @Enumerated(EnumType.STRING)
+    @Column(name = "verification_status", nullable = false, length = 16)
+    private VerificationStatus verificationStatus;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private LocalDateTime createdAt;
@@ -67,14 +91,65 @@ public class ChemicalIncompatibility {
      * 落库与后续查表都用同一个规范顺序。
      */
     public static ChemicalIncompatibility of(String casA, String casB, String reason, String source) {
+        return of(casA, casB, reason, source,
+                IncompatibilitySourceType.MSDS, null, null, null, VerificationStatus.PENDING);
+    }
+
+    /** 带结构化依据的创建入口：迁移、种子与批量导入都应该走这条 */
+    public static ChemicalIncompatibility of(String casA, String casB, String reason, String source,
+                                             IncompatibilitySourceType sourceType,
+                                             String sourceDoc,
+                                             String sourceClause,
+                                             String sourceExcerpt,
+                                             VerificationStatus verificationStatus) {
         String first = orderedFirst(casA, casB);
         String second = first.equals(casA) ? casB : casA;
-        return ChemicalIncompatibility.builder()
+        ChemicalIncompatibility rule = ChemicalIncompatibility.builder()
                 .casA(first)
                 .casB(second)
                 .reason(reason)
                 .source(source)
+                .sourceType(sourceType == null ? IncompatibilitySourceType.MSDS : sourceType)
+                .sourceDoc(sourceDoc)
+                .sourceClause(sourceClause)
+                .sourceExcerpt(sourceExcerpt)
+                .verificationStatus(verificationStatus == null ? VerificationStatus.PENDING : verificationStatus)
                 .build();
+        return rule;
+    }
+
+    /**
+     * 补齐已存在规则的结构化依据。
+     *
+     * <p>只在字段为空时填，不覆盖人工修正过的内容；状态也只在当前为 PENDING 时升级，
+     * 避免一次种子灌入把「已降级为待核实」的规则又改回 VERIFIED。
+     */
+    public void applyBasis(IncompatibilitySourceType type,
+                           String doc,
+                           String clause,
+                           String excerpt,
+                           VerificationStatus status) {
+        if (sourceType == null) {
+            sourceType = type == null ? IncompatibilitySourceType.MSDS : type;
+        }
+        if (sourceDoc == null) {
+            sourceDoc = doc;
+        }
+        if (sourceClause == null) {
+            sourceClause = clause;
+        }
+        if (sourceExcerpt == null) {
+            sourceExcerpt = excerpt;
+        }
+        if (status == VerificationStatus.VERIFIED && verificationStatus != VerificationStatus.VERIFIED) {
+            verificationStatus = VerificationStatus.VERIFIED;
+        }
+    }
+
+    /** 是否具备可展示的结构化依据（doc + clause + excerpt 至少有一个，且状态已核实） */
+    public boolean hasVerifiedBasis() {
+        return verificationStatus == VerificationStatus.VERIFIED
+                && (sourceDoc != null || sourceClause != null || sourceExcerpt != null);
     }
 
     /** 两个不同 CAS 中字典序较小的那个；相同或为空属于调用方错误，直接拒绝 */

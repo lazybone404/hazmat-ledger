@@ -1,6 +1,7 @@
 package com.lazybone.hazmat.service;
 
 import com.lazybone.hazmat.common.BusinessException;
+import com.lazybone.hazmat.common.DocumentNoGenerator;
 import com.lazybone.hazmat.common.ResourceNotFoundException;
 import com.lazybone.hazmat.dto.StocktakeCreateRequest;
 import com.lazybone.hazmat.dto.StocktakeItemRequest;
@@ -18,6 +19,7 @@ import com.lazybone.hazmat.repository.StockLedgerRepository;
 import com.lazybone.hazmat.repository.StocktakeItemRepository;
 import com.lazybone.hazmat.repository.StocktakeRepository;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -27,10 +29,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -55,8 +55,6 @@ import java.util.stream.Collectors;
 @Slf4j
 @Service
 public class StocktakeService {
-
-    private static final DateTimeFormatter NO_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd");
 
     /** 「未完成」的盘点状态。建单时要挡住同一批次被两张单同时盘 */
     private static final List<StocktakeStatus> OPEN_STATUSES =
@@ -113,12 +111,20 @@ public class StocktakeService {
             throw new BusinessException("以下批次已在未完成的盘点单里，请先完成或撤销那张单：" + batchNos);
         }
 
-        Stocktake stocktake = stocktakeRepository.save(Stocktake.builder()
-                .stocktakeNo(nextStocktakeNo())
-                .status(StocktakeStatus.DRAFT)
-                .remark(request.remark())
-                .createdBy(operator)
-                .build());
+        Stocktake stocktake;
+        try {
+            // 先 flush 再写明细：单号撞唯一索引时这里就抛出来，此时还没有写入任何明细
+            stocktake = stocktakeRepository.saveAndFlush(Stocktake.builder()
+                    .stocktakeNo(nextStocktakeNo())
+                    .status(StocktakeStatus.DRAFT)
+                    .remark(request.remark())
+                    .createdBy(operator)
+                    .build());
+        } catch (DataIntegrityViolationException e) {
+            // 单号是 32 位随机序号，多实例部署时仍可能撞上唯一索引。
+            // 这是可重试的冲突，不是服务端故障，返回业务错误而不是 500
+            throw new BusinessException("盘点单号生成冲突，请重新提交");
+        }
 
         itemRepository.saveAll(batches.stream()
                 .map(b -> StocktakeItem.builder()
@@ -339,13 +345,12 @@ public class StocktakeService {
     }
 
     /**
-     * 单号：ST + 日期 + 4 位随机，规则同申请单。
+     * 单号：规则同申请单，见 {@link DocumentNoGenerator}。
      *
      * 不用「当天流水号 +1」，是因为那要查一次当天最大值，又是一处并发点。
-     * 唯一性由唯一索引兜底，撞号重试即可，单号不需要连续。
+     * 唯一性最终由唯一索引兜底，{@link #create} 会把冲突翻译成 409 而不是 500。
      */
     private String nextStocktakeNo() {
-        return "ST" + LocalDateTime.now().format(NO_FORMAT)
-                + String.format("%04d", ThreadLocalRandom.current().nextInt(10000));
+        return DocumentNoGenerator.next("ST");
     }
 }

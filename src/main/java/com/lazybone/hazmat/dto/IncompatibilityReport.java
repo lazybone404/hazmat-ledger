@@ -24,6 +24,7 @@ import java.util.List;
  * @param uncoveredCount           未覆盖组合数
  * @param coStoredUncoveredCount   未覆盖且当前同柜的组合数
  * @param uncovered                未覆盖组合明细，与两类 conflict 互斥且并集为全部比对对
+ * @param basisCoverage            命中规则的依据覆盖情况；未覆盖组合不计入其中
  * @param message                  面向使用者的整体说明
  */
 public record IncompatibilityReport(
@@ -36,6 +37,7 @@ public record IncompatibilityReport(
         int uncoveredCount,
         int coStoredUncoveredCount,
         List<UncoveredPair> uncovered,
+        BasisCoverage basisCoverage,
         String message
 ) {
 
@@ -54,6 +56,7 @@ public record IncompatibilityReport(
                 chemicalCount, locationCount, pairCount, coStoredPairCount,
                 List.copyOf(conflicts), List.copyOf(separatedConflicts),
                 uncovered.size(), coStoredUncoveredCount, List.copyOf(uncovered),
+                BasisCoverage.of(conflicts, separatedConflicts),
                 message(chemicalCount, conflicts, separatedConflicts, uncovered));
     }
 

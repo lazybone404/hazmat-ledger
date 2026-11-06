@@ -1,5 +1,6 @@
 package com.lazybone.hazmat.dto;
 
+import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -16,6 +17,7 @@ import java.math.BigDecimal;
 public record ScrapRequest(
         @NotNull(message = "报废量不能为空")
         @DecimalMin(value = "0.001", message = "报废量必须大于 0")
+        @DecimalMax(value = "999999999.999", message = "报废量超出可记录范围")
         BigDecimal quantity,
 
         @NotBlank(message = "报废原因不能为空")

@@ -6,7 +6,9 @@ import com.lazybone.hazmat.dto.ChemicalRequest;
 import com.lazybone.hazmat.dto.InboundRequest;
 import com.lazybone.hazmat.entity.AppUser;
 import com.lazybone.hazmat.entity.ChemicalIncompatibility;
+import com.lazybone.hazmat.entity.IncompatibilitySourceType;
 import com.lazybone.hazmat.entity.UserRole;
+import com.lazybone.hazmat.entity.VerificationStatus;
 import com.lazybone.hazmat.repository.AppUserRepository;
 import com.lazybone.hazmat.repository.ChemicalBatchRepository;
 import com.lazybone.hazmat.repository.ChemicalIncompatibilityRepository;
@@ -94,11 +96,22 @@ class IncompatibilityTest {
         noStockSulfateId = chemicalService.create(new ChemicalRequest(
                 "7757-82-6", "无水硫酸钠", "一般", "低", "g", "AR 500g", null, null)).getId();
 
+        // 三条规则分别覆盖依据的三态：已核实 / 有依据待核实 / 完全没有结构化依据
         ruleRepository.saveAll(List.of(
                 ChemicalIncompatibility.of("7722-64-7", "7647-01-0",
-                        "高锰酸钾禁配浓盐酸，反应放出氯气", "MSDS 7722-64-7 第10节"),
+                        "高锰酸钾禁配浓盐酸，反应放出氯气", "MSDS 7722-64-7 第10节",
+                        IncompatibilitySourceType.MSDS,
+                        "MSDS 7722-64-7",
+                        "第10节 稳定性和反应性·禁配物",
+                        "禁配物：浓盐酸、有机物。",
+                        VerificationStatus.VERIFIED),
                 ChemicalIncompatibility.of("7722-64-7", "7664-93-9",
-                        "高锰酸钾与浓硫酸反应生成易爆的七氧化二锰", "MSDS 7722-64-7 第10节"),
+                        "高锰酸钾与浓硫酸反应生成易爆的七氧化二锰", "MSDS 7722-64-7 第10节",
+                        IncompatibilitySourceType.MSDS,
+                        "MSDS 7722-64-7",
+                        null,
+                        null,
+                        VerificationStatus.PENDING),
                 ChemicalIncompatibility.of("7722-64-7", "7722-84-1",
                         "高锰酸钾禁配过氧化氢，两者混合剧烈反应", "MSDS 7722-64-7 第10节")));
     }
@@ -140,6 +153,15 @@ class IncompatibilityTest {
         assertThat(texts(findPair(data.path("uncovered"), "7664-93-9", "7722-84-1")
                 .path("sharedLocations"))).isEmpty();
 
+        // 依据覆盖只统计命中的三条规则：1 条已核实、1 条待核实、1 条没有结构化依据；
+        // 未覆盖组合是「规则表没有」，不计入这个比例
+        JsonNode coverage = data.path("basisCoverage");
+        assertThat(coverage.path("total").asInt()).isEqualTo(3);
+        assertThat(coverage.path("verified").asInt()).isEqualTo(1);
+        assertThat(coverage.path("pending").asInt()).isEqualTo(1);
+        assertThat(coverage.path("missing").asInt()).isEqualTo(1);
+        assertThat(coverage.path("verifiedRatio").asDouble()).isEqualTo(0.33);
+
         assertThat(data.path("message").asText())
                 .contains("2 对同柜禁忌混放")
                 .contains("1 对已知禁忌物当前分柜存放")
@@ -170,6 +192,19 @@ class IncompatibilityTest {
             assertThat(conflict.path("reason").asText()).isNotBlank();
             assertThat(conflict.path("source").asText()).contains("MSDS");
         }
+
+        // 有结构化依据的规则把 type/doc/clause/excerpt 一起带出，前端不用再翻 MSDS
+        JsonNode withBasis = findPair(data.path("conflicts"), "7722-64-7", "7647-01-0");
+        assertThat(withBasis.path("basis").path("type").asText()).isEqualTo("MSDS");
+        assertThat(withBasis.path("basis").path("doc").asText()).contains("7722-64-7");
+        assertThat(withBasis.path("basis").path("clause").asText()).contains("第10节");
+        assertThat(withBasis.path("basis").path("excerpt").asText()).contains("禁配物");
+        assertThat(withBasis.path("basis").path("verificationStatus").asText())
+                .isEqualTo("VERIFIED");
+
+        // 只有规则、没有条款级依据时必须显式 null，而不是伪造一个空对象
+        JsonNode withoutBasis = findPair(data.path("conflicts"), "7722-64-7", "7722-84-1");
+        assertThat(withoutBasis.path("basis").isNull()).isTrue();
 
         JsonNode separated = data.path("separatedConflicts").get(0);
         assertThat(separated.path("chemicalB").path("casNo").asText()).isEqualTo("7664-93-9");
