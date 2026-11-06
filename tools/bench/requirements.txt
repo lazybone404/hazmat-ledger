@@ -1,0 +1,5 @@
+# pgvector_bench.py 的依赖。
+# 安装（国内镜像）：
+#   python -m pip install -r tools/bench/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+numpy>=2.0
+psycopg2-binary>=2.9
