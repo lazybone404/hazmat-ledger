@@ -23,7 +23,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * 检索指标评测：Hit@1 / Hit@5 / MRR@10 / Recall@5，按题集类型分组。
  *
  * 与 {@link MsdsRetrievalEvalTest} 的分工：那边只回答「融合有没有比字面差」，
- * 是回归闸门；这里回答「到底有多好」，产出可以贴进文档和面试的数字。
+ * 是回归闸门；这里回答「到底有多好」，产出可以贴进文档和对外讲解的数字。
  * 两者共用同一套题集与同一套匹配规则，所以 Hit@5 必须对得上。
  *
  * <b>匹配粒度的已知偏差：</b>题集的标注只到「哪份试剂的第几节」，
