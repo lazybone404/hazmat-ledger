@@ -677,7 +677,7 @@ src/main/java/com/lazybone/hazmat/
 │                    ScrapOrder 报废申请 / ScrapOrderStatus 报废状态机
 │                    DocumentNoSegment 业务单号号段 / MsdsIndexLock 索引重建行锁
 │                    OpsAlert 运维告警（指纹去重 + 重新打开）
-├── repository/      17 个；扣减、盘点调账、开封 CAS 与状态 CAS 的关键 SQL 都在 ChemicalBatchRepository
+├── repository/      18 个；扣减、盘点调账、开封 CAS 与状态 CAS 的关键 SQL 都在 ChemicalBatchRepository
 ├── service/         StockService 入库出库与对账（核心） / RequisitionService 流程（核心）
 │                    StocktakeService 盘点建单与调账（核心） / ChemicalService
 │                    ScrapOrderService 报废申请、审批与自动驳回
