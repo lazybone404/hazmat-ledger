@@ -671,6 +671,7 @@
             }
         },
         template: `
+<div v-if="error && !chemical" class="alert error">{{ error }}</div>
 <section v-if="chemical">
     <div class="page-head">
         <div>
@@ -1106,6 +1107,7 @@
             }
         },
         template: `
+<div v-if="error && !req" class="alert error">{{ error }}</div>
 <section v-if="req">
     <div class="page-head">
         <div>
@@ -1315,8 +1317,16 @@
             },
             async save(item) {
                 const edit = this.edits[item.itemId];
+                // 空输入不能直接 Number()：Number('') 是 0，会把「还没数」写成实盘 0，
+                // 确认后整批库存被调成 0。非法输入也在这里挡下，不发请求。
+                const raw = String(edit.actualQuantity == null ? '' : edit.actualQuantity).trim();
+                const actualQuantity = Number(raw);
+                if (raw === '' || !Number.isFinite(actualQuantity)) {
+                    notify('请先填写实盘量：' + item.batchNo);
+                    return;
+                }
                 const body = {
-                    actualQuantity: Number(edit.actualQuantity),
+                    actualQuantity: actualQuantity,
                     note: edit.note || null
                 };
                 const done = await this.act('item-' + item.itemId, () => api(
@@ -1336,6 +1346,7 @@
             }
         },
         template: `
+<div v-if="error && !detail" class="alert error">{{ error }}</div>
 <section v-if="detail">
     <div class="page-head">
         <div>

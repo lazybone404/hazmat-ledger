@@ -177,7 +177,7 @@ public class StocktakeService {
     @Transactional
     public StocktakeItem recordActual(String stocktakeNo, Long itemId,
                                       StocktakeItemRequest request) {
-        Stocktake stocktake = findByNo(stocktakeNo);
+        Stocktake stocktake = findByNoForUpdate(stocktakeNo);
         if (stocktake.getStatus() != StocktakeStatus.DRAFT) {
             throw new BusinessException("只有草稿状态可以录入实盘量，当前状态 " + stocktake.getStatus());
         }
@@ -210,7 +210,7 @@ public class StocktakeService {
      */
     @Transactional
     public Stocktake submit(String stocktakeNo, String operator) {
-        Stocktake stocktake = findByNo(stocktakeNo);
+        Stocktake stocktake = findByNoForUpdate(stocktakeNo);
         requireTransition(stocktake, StocktakeStatus.SUBMITTED);
 
         List<StocktakeItem> items = itemRepository.findByStocktakeIdOrderByIdAsc(stocktake.getId());
@@ -247,7 +247,7 @@ public class StocktakeService {
      */
     @Transactional
     public Stocktake review(String stocktakeNo, String reviewer, String comment) {
-        Stocktake stocktake = findByNo(stocktakeNo);
+        Stocktake stocktake = findByNoForUpdate(stocktakeNo);
         requireTransition(stocktake, StocktakeStatus.REVIEWED);
 
         if (requireSeparateConfirmer && reviewer.equals(stocktake.getSubmittedBy())) {
@@ -280,7 +280,7 @@ public class StocktakeService {
      */
     @Transactional
     public Stocktake confirm(String stocktakeNo, String operator) {
-        Stocktake stocktake = findByNo(stocktakeNo);
+        Stocktake stocktake = findByNoForUpdate(stocktakeNo);
 
         if (requireReview && stocktake.getStatus() != StocktakeStatus.REVIEWED) {
             throw new BusinessException("当前配置要求先复核再确认，这张单的状态是 "
@@ -339,7 +339,7 @@ public class StocktakeService {
     /** 撤销：不调账，只把单子作废。已确认的不能撤销（差异已经进台账了） */
     @Transactional
     public Stocktake cancel(String stocktakeNo, String operator) {
-        Stocktake stocktake = findByNo(stocktakeNo);
+        Stocktake stocktake = findByNoForUpdate(stocktakeNo);
         requireTransition(stocktake, StocktakeStatus.CANCELLED);
         stocktake.setStatus(StocktakeStatus.CANCELLED);
         saveWithOptimisticCheck(stocktake);
@@ -388,6 +388,12 @@ public class StocktakeService {
 
     private Stocktake findByNo(String stocktakeNo) {
         return stocktakeRepository.findByStocktakeNo(stocktakeNo)
+                .orElseThrow(() -> new ResourceNotFoundException("盘点单不存在: " + stocktakeNo));
+    }
+
+    /** 所有会改状态或明细的入口都先拿行锁，避免录入与提交/复核/确认交错 */
+    private Stocktake findByNoForUpdate(String stocktakeNo) {
+        return stocktakeRepository.findByStocktakeNoForUpdate(stocktakeNo)
                 .orElseThrow(() -> new ResourceNotFoundException("盘点单不存在: " + stocktakeNo));
     }
 
