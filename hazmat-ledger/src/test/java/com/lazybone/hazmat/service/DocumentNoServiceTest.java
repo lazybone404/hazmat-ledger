@@ -79,12 +79,14 @@ class DocumentNoServiceTest {
             ExecutorService pool = Executors.newFixedThreadPool(2);
             var a = pool.submit(() -> {
                 for (int i = 0; i < perInstance; i++) {
-                    assertTrue(numbers.add(instanceA.next(prefix)), "实例 A 出现重复单号");
+                    String no = instanceA.next(prefix);
+                    assertTrue(numbers.add(no), "实例 A 出现重复单号: " + no);
                 }
             });
             var b = pool.submit(() -> {
                 for (int i = 0; i < perInstance; i++) {
-                    assertTrue(numbers.add(instanceB.next(prefix)), "实例 B 出现重复单号");
+                    String no = instanceB.next(prefix);
+                    assertTrue(numbers.add(no), "实例 B 出现重复单号: " + no);
                 }
             });
             a.get(30, TimeUnit.SECONDS);

@@ -1,6 +1,5 @@
 package com.lazybone.hazmat.service;
 
-import com.lazybone.hazmat.entity.DocumentNoSegment;
 import com.lazybone.hazmat.repository.DocumentNoSegmentRepository;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -14,6 +13,12 @@ import java.time.LocalDateTime;
 /**
  * 从数据库分配号段。
  *
+ * <p>推进号段用一条原子的 {@code UPDATE ... SET next_value = next_value + block}，
+ * 不先读再写。早期版本用 {@code SELECT ... FOR UPDATE} 取行、在实体上改值再保存，
+ * 实测在并发下会分配出重叠区间：读与写之间锁没兜住，两个事务读到同一个
+ * {@code next_value}；而行不存在时 {@code save()} 走 {@code merge}，别人刚插入的行
+ * 会让它在「插入」和「用旧值更新」之间摇摆。两者都会让两个线程拿到同一段号。
+ *
  * <p>用显式事务模板而不是 {@code @Transactional}：号段行不存在时要插入，
  * 两个实例同时插入会撞唯一约束。冲突发生在内层事务里，必须等它完整回滚后
  * 再开一个新事务重试；在同一个 {@code @Transactional} 方法里 catch 住异常，
@@ -25,6 +30,8 @@ import java.time.LocalDateTime;
 @Slf4j
 @Service
 public class DocumentNoSegmentAllocator {
+
+    private static final int MAX_ATTEMPTS = 3;
 
     private final DocumentNoSegmentRepository repository;
     private final TransactionTemplate transactionTemplate;
@@ -38,34 +45,34 @@ public class DocumentNoSegmentAllocator {
 
     /**
      * 分配 {@code [start, start + blockSize)}，返回起始值。
-     * 行不存在时插入；唯一冲突后回滚并重试一次。
+     * 行不存在时插入；插入撞主键时回滚本事务后重试，重试会走 UPDATE 路径。
      */
     public long allocate(String prefix, int blockSize) {
         if (blockSize < 1) {
             throw new IllegalArgumentException("blockSize 必须大于 0: " + blockSize);
         }
-        try {
-            return allocateOnce(prefix, blockSize);
-        } catch (DataIntegrityViolationException e) {
-            log.info("号段 {} 插入冲突，回滚后重试一次", prefix);
-            return allocateOnce(prefix, blockSize);
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            try {
+                return allocateOnce(prefix, blockSize);
+            } catch (DataIntegrityViolationException e) {
+                log.info("号段 {} 建行冲突，第 {} 次重试", prefix, attempt);
+            }
         }
+        throw new IllegalStateException("号段分配连续冲突，放弃: " + prefix);
     }
 
     private long allocateOnce(String prefix, int blockSize) {
         Long start = transactionTemplate.execute(status -> {
             LocalDateTime now = LocalDateTime.now();
-            DocumentNoSegment segment = repository.findForUpdate(prefix)
-                    .orElseGet(() -> DocumentNoSegment.builder()
-                            .prefix(prefix)
-                            .nextValue(1L)
-                            .updatedAt(now)
-                            .build());
-            long startValue = segment.getNextValue();
-            segment.setNextValue(startValue + blockSize);
-            segment.setUpdatedAt(now);
-            repository.saveAndFlush(segment);
-            return startValue;
+            if (repository.advance(prefix, blockSize, now) > 0) {
+                long next = repository.findNextValue(prefix)
+                        .orElseThrow(() -> new IllegalStateException("号段行更新后读不到: " + prefix));
+                return next - blockSize;
+            }
+            // 行还不存在：本 prefix 第一次取号。另一个实例可能刚插入但尚未提交，
+            // 插入会撞主键，交给 allocate 回滚后重试。
+            repository.insertRow(prefix, 1L + blockSize, now);
+            return 1L;
         });
         if (start == null) {
             throw new IllegalStateException("号段分配未返回结果: " + prefix);
