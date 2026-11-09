@@ -417,11 +417,21 @@ public class MsdsIndexService {
      * 都会把上一版块也带进结果，表现为同一段正文被召回两次、块数翻倍。
      */
     public List<MsdsChunk> activeChunks() {
-        MsdsIndexMeta meta = loadMeta();
-        String active = meta == null ? null : meta.getActiveVersion();
+        String active = activeVersion();
         return active == null
                 ? chunkRepository.findByIndexVersionIsNullOrderByCasNoAscSectionNoAscPartNoAsc()
                 : chunkRepository.findByIndexVersionOrderByCasNoAscSectionNoAscPartNoAsc(active);
+    }
+
+    /**
+     * 当前生效的索引版本号；尚未版本化（历史数据）时返回 null。
+     *
+     * <p>安全摘要要按「同一版本、同一 CAS、指定章节」取块，必须和检索看到的是
+     * 同一份索引；直接查全表会把重建前后的两版块混在一起。
+     */
+    public String activeVersion() {
+        MsdsIndexMeta meta = loadMeta();
+        return meta == null ? null : meta.getActiveVersion();
     }
 
     private MsdsIndexMeta loadMeta() {

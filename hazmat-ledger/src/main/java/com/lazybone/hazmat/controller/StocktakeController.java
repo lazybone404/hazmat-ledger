@@ -6,6 +6,7 @@ import com.lazybone.hazmat.common.PageResponse;
 import com.lazybone.hazmat.dto.StocktakeCreateRequest;
 import com.lazybone.hazmat.dto.StocktakeItemRequest;
 import com.lazybone.hazmat.dto.StocktakeResponse;
+import com.lazybone.hazmat.dto.StocktakeReviewRequest;
 import com.lazybone.hazmat.dto.StocktakeSummary;
 import com.lazybone.hazmat.entity.Stocktake;
 import com.lazybone.hazmat.entity.StocktakeStatus;
@@ -42,10 +43,14 @@ import java.util.Set;
  * 比入库、报废更敏感（那两种至少还有「单号 + 原因」作为约束）。普通用户的读权限保留：
  * 知道库里到底有多少，对同实验室所有人都是有用信息。
  *
- * <b>提交人与确认人是否必须分开？</b>这里没有强制，只分别留痕。
- * 原因是单管理员部署（很多小型实验室就一个库管）时强制会把流程卡死；
- * 真要分离，得先有「多人具备 ADMIN」这个前提，属于部署策略而不是代码规则。
- * 留痕能保证事后审计回答得出「谁数的、谁认的」。
+ * <b>提交人、复核人、确认人是否必须分开？</b>由配置决定，默认不强制，只分别留痕：
+ * <ul>
+ *   <li>{@code hazmat.stocktake.require-review=true}：SUBMITTED 必须先复核才能确认。</li>
+ *   <li>{@code hazmat.stocktake.require-separate-confirmer=true}：复核人、确认人都不能是提交人。</li>
+ * </ul>
+ * 默认关闭的原因是单管理员部署（很多小型实验室就一个库管）下强制会把流程卡死；
+ * 需要职责分离时在部署环境显式打开，属于部署策略而不是代码规则。
+ * 留痕能保证事后审计回答得出「谁数的、谁核的、谁认的」。
  */
 @RestController
 @RequestMapping("/api/stocktakes")
@@ -117,6 +122,21 @@ public class StocktakeController {
     public ApiResponse<StocktakeResponse> submit(@Size(max = 40) @PathVariable String stocktakeNo,
                                                  @AuthenticationPrincipal Jwt jwt) {
         stocktakeService.submit(stocktakeNo, jwt.getSubject());
+        return ApiResponse.ok(stocktakeService.view(stocktakeNo));
+    }
+
+    /**
+     * 复核：SUBMITTED → REVIEWED。只是签字，不动库存。
+     *
+     * <p>是否必须先复核由 {@code hazmat.stocktake.require-review} 决定；
+     * 关闭时这个接口仍可调用，作为「我看过了」的留痕，但不会阻塞确认。
+     */
+    @PostMapping("/{stocktakeNo}/review")
+    @PreAuthorize("hasRole('ADMIN')")
+    public ApiResponse<StocktakeResponse> review(@Size(max = 40) @PathVariable String stocktakeNo,
+                                                 @Valid @RequestBody StocktakeReviewRequest request,
+                                                 @AuthenticationPrincipal Jwt jwt) {
+        stocktakeService.review(stocktakeNo, jwt.getSubject(), request.comment());
         return ApiResponse.ok(stocktakeService.view(stocktakeNo));
     }
 

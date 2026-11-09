@@ -3,11 +3,19 @@ package com.lazybone.hazmat;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.lazybone.hazmat.dto.ChemicalRequest;
+import com.lazybone.hazmat.dto.InboundRequest;
+import com.lazybone.hazmat.dto.RequisitionRequest;
 import com.lazybone.hazmat.entity.AppUser;
 import com.lazybone.hazmat.entity.UserRole;
 import com.lazybone.hazmat.repository.AppUserRepository;
+import com.lazybone.hazmat.repository.ChemicalBatchRepository;
 import com.lazybone.hazmat.repository.ChemicalRepository;
+import com.lazybone.hazmat.repository.RequisitionLogRepository;
+import com.lazybone.hazmat.repository.RequisitionRepository;
+import com.lazybone.hazmat.repository.StockLedgerRepository;
 import com.lazybone.hazmat.service.ChemicalService;
+import com.lazybone.hazmat.service.RequisitionService;
+import com.lazybone.hazmat.service.StockService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -19,7 +27,9 @@ import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDate;
 import java.util.Map;
 
 import static org.hamcrest.Matchers.everyItem;
@@ -55,19 +65,33 @@ class ChemicalSafetyTest {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private AppUserRepository userRepository;
     @Autowired private ChemicalRepository chemicalRepository;
+    @Autowired private ChemicalBatchRepository batchRepository;
+    @Autowired private RequisitionRepository requisitionRepository;
+    @Autowired private RequisitionLogRepository requisitionLogRepository;
+    @Autowired private StockLedgerRepository ledgerRepository;
     @Autowired private PasswordEncoder passwordEncoder;
     @Autowired private ChemicalService chemicalService;
+    @Autowired private StockService stockService;
+    @Autowired private RequisitionService requisitionService;
 
     private Long methanolId;
     private Long noMsdsId;
+    private String methanolReqNo;
 
     @BeforeEach
     void setUp() {
+        requisitionLogRepository.deleteAll();
+        requisitionRepository.deleteAll();
+        ledgerRepository.deleteAll();
+        batchRepository.deleteAll();
         userRepository.deleteAll();
         chemicalRepository.deleteAll();
 
         userRepository.save(AppUser.builder()
                 .username("alice").displayName("张三").role(UserRole.USER)
+                .passwordHash(passwordEncoder.encode(PASSWORD)).enabled(true).build());
+        userRepository.save(AppUser.builder()
+                .username("bob").displayName("李四").role(UserRole.USER)
                 .passwordHash(passwordEncoder.encode(PASSWORD)).enabled(true).build());
 
         // 甲醇在 classpath 的 MSDS 目录里有对应文件
@@ -76,13 +100,29 @@ class ChemicalSafetyTest {
         // 这个 CAS 没有对应的 MSDS 文件
         noMsdsId = chemicalService.create(new ChemicalRequest(
                 NO_MSDS_CAS, "未收录试剂", "其他", "低", "g", "AR 100g", null, null)).getId();
+
+        // 安全摘要挂在领用申请下面，所以两条流程都要先有库存和申请单
+        stockService.inbound(methanolId,
+                new InboundRequest("CS-1", new BigDecimal("500"), "柜 A-1",
+                        LocalDate.now().plusYears(1)), "alice");
+        methanolReqNo = requisitionService.submit("alice", new RequisitionRequest(
+                methanolId, new BigDecimal("10"), "安全摘要测试")).getReqNo();
+        stockService.inbound(noMsdsId,
+                new InboundRequest("CS-2", new BigDecimal("100"), "柜 A-2",
+                        LocalDate.now().plusYears(1)), "alice");
+        requisitionService.submit("alice", new RequisitionRequest(
+                noMsdsId, new BigDecimal("10"), "安全摘要测试"));
     }
 
     private String login() throws Exception {
+        return login("alice");
+    }
+
+    private String login(String username) throws Exception {
         MvcResult result = mockMvc.perform(post("/api/auth/login")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(
-                                Map.of("username", "alice", "password", PASSWORD))))
+                                Map.of("username", username, "password", PASSWORD))))
                 .andExpect(status().isOk())
                 .andReturn();
         JsonNode body = objectMapper.readTree(
@@ -155,5 +195,48 @@ class ChemicalSafetyTest {
                         .header("Authorization", login()))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value(400));
+    }
+
+    @Test
+    @DisplayName("领用详情的安全摘要：按固定节号返回危险性、急救、泄漏、防护四节")
+    void requisitionSafetyOverviewReturnsFixedSections() throws Exception {
+        mockMvc.perform(get("/api/requisitions/" + methanolReqNo + "/safety")
+                        .header("Authorization", login()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.available").value(true))
+                .andExpect(jsonPath("$.data.casNo").value(METHANOL_CAS))
+                .andExpect(jsonPath("$.data.sections").isNotEmpty())
+                // 每节正文都要有内容；「取到了节但正文是空」对领用人等于没给
+                .andExpect(jsonPath("$.data.sections[*].sectionNo", hasItem(2)))
+                .andExpect(jsonPath("$.data.sections[*].sectionNo", hasItem(4)))
+                .andExpect(jsonPath("$.data.sections[*].title").isNotEmpty())
+                .andExpect(jsonPath("$.data.sections[*].content").isNotEmpty());
+    }
+
+    @Test
+    @DisplayName("没有 MSDS 的试剂：领用安全摘要 available=false，并说明原因")
+    void requisitionSafetyOverviewReportsUnavailable() throws Exception {
+        String reqNo = requisitionRepository.findAll().stream()
+                .filter(r -> r.getChemicalId().equals(noMsdsId))
+                .findFirst().orElseThrow().getReqNo();
+
+        mockMvc.perform(get("/api/requisitions/" + reqNo + "/safety")
+                        .header("Authorization", login()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.available").value(false))
+                .andExpect(jsonPath("$.data.sections").isEmpty())
+                .andExpect(jsonPath("$.data.message").value(
+                        "该试剂尚未索引 MSDS 原文，暂无法提供安全摘要"));
+    }
+
+    @Test
+    @DisplayName("安全摘要跟随申请详情的权限：别人看不了，未登录 401")
+    void requisitionSafetyOverviewFollowsDetailPermission() throws Exception {
+        mockMvc.perform(get("/api/requisitions/" + methanolReqNo + "/safety")
+                        .header("Authorization", login("bob")))
+                .andExpect(status().isForbidden());
+
+        mockMvc.perform(get("/api/requisitions/" + methanolReqNo + "/safety"))
+                .andExpect(status().isUnauthorized());
     }
 }

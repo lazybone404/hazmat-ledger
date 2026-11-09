@@ -4,11 +4,13 @@ import com.lazybone.hazmat.common.ApiResponse;
 import com.lazybone.hazmat.common.ForbiddenException;
 import com.lazybone.hazmat.common.PageQuery;
 import com.lazybone.hazmat.common.PageResponse;
+import com.lazybone.hazmat.dto.ChemicalSafetyOverview;
 import com.lazybone.hazmat.dto.RequisitionRequest;
 import com.lazybone.hazmat.dto.RequisitionResponse;
 import com.lazybone.hazmat.dto.ReviewRequest;
 import com.lazybone.hazmat.entity.RequisitionLog;
 import com.lazybone.hazmat.entity.RequisitionStatus;
+import com.lazybone.hazmat.service.ChemicalSafetyService;
 import com.lazybone.hazmat.service.RequisitionService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
@@ -56,9 +58,12 @@ public class RequisitionController {
             Set.of("id", "createdAt", "status", "quantity");
 
     private final RequisitionService requisitionService;
+    private final ChemicalSafetyService chemicalSafetyService;
 
-    public RequisitionController(RequisitionService requisitionService) {
+    public RequisitionController(RequisitionService requisitionService,
+                                 ChemicalSafetyService chemicalSafetyService) {
         this.requisitionService = requisitionService;
+        this.chemicalSafetyService = chemicalSafetyService;
     }
 
     /** 提交申请，申请人取当前登录账号 */
@@ -127,6 +132,23 @@ public class RequisitionController {
         }
         return ApiResponse.ok(new DetailView(RequisitionResponse.from(d.requisition()),
                 d.timeline().stream().map(LogView::from).toList()));
+    }
+
+    /**
+     * 领用详情页的安全摘要：固定取 MSDS 的 2/4/6/8 节（危害、急救、泄漏、防护）。
+     *
+     * <p>权限与详情一致：本人或 APPROVER / ADMIN。安全摘要本身不是秘密，
+     * 但它挂在申请下面，能看申请的人才能看；这样权限模型只有一套，不用另开一条规则。
+     */
+    @GetMapping("/{reqNo}/safety")
+    public ApiResponse<ChemicalSafetyOverview> safety(@Size(max = 40) @PathVariable String reqNo,
+                                                      Authentication authentication) {
+        RequisitionService.Detail d = requisitionService.detail(reqNo);
+        if (!canReadOthers(authentication)
+                && !d.requisition().getApplicant().equals(authentication.getName())) {
+            throw new ForbiddenException("只能查看自己申请的安全信息");
+        }
+        return ApiResponse.ok(chemicalSafetyService.overview(d.requisition().getChemicalId()));
     }
 
     /**
