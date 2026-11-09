@@ -304,7 +304,74 @@ public class StockService {
     }
 
     /**
-     * 报废：把批次里不可用的量扣掉，并写一条台账流水。
+     * 一次报废尝试的结果。
+     *
+     * <p>为什么不用异常表示失败：报废审批需要「扣减失败 → 把单据标成 REJECTED
+     * 并正常提交」这条路径。如果扣减失败抛异常，整个审批事务会回滚，单据会永远停在
+     * PENDING，既批不过也撤不掉。返回结果对象让调用方自己决定怎么处理——
+     * 管理员应急入口把它翻译成 400，审批入口把它翻译成「自动驳回 + 409」。
+     */
+    public record ScrapOutcome(boolean success, ScrapResult result, String failureMessage) {
+
+        static ScrapOutcome ok(ScrapResult result) {
+            return new ScrapOutcome(true, result, null);
+        }
+
+        static ScrapOutcome failed(String message) {
+            return new ScrapOutcome(false, null, message);
+        }
+    }
+
+    /**
+     * 报废的核心：校验批次归属、条件扣减、写台账。失败不抛异常，返回失败原因。
+     *
+     * <p>{@code refType/refId} 由调用方决定：管理员应急入口写 {@code SCRAP + batchId}，
+     * 报废审批单写 {@code SCRAP_ORDER + orderId}。两者必须分得清——历史流水的 refId
+     * 是批次 id，新流水的是单据 id，报表按 refId 关联前要先看 refType。
+     *
+     * <p>本方法带 {@code @Transactional}，外部调用时会加入调用方事务：
+     * 审批通过时「扣库存 + 写流水 + 改单据状态」必须一起提交或一起回滚。
+     */
+    @Transactional
+    public ScrapOutcome tryScrap(Long chemicalId, Long batchId, BigDecimal quantity, String reason,
+                                 String refType, Long refId, String operator) {
+        ChemicalBatch batch = batchRepository.findById(batchId)
+                .orElse(null);
+        if (batch == null) {
+            return ScrapOutcome.failed("批次不存在，可能已被清理");
+        }
+        if (!batch.getChemicalId().equals(chemicalId)) {
+            return ScrapOutcome.failed("批次 " + batch.getBatchNo() + " 不属于试剂 " + chemicalId);
+        }
+
+        int affected = batchRepository.deduct(batchId, quantity);
+        if (affected == 0) {
+            return ScrapOutcome.failed("批次 " + batch.getBatchNo() + " 当前可用量不足，无法报废 "
+                    + quantity);
+        }
+
+        // 与出库一致：扣减成功后该行被本事务锁住，重新读出的才是确定余额。
+        BigDecimal balanceAfter = batchRepository.currentQuantity(batchId);
+
+        ledgerRepository.save(StockLedger.builder()
+                .batchId(batchId)
+                .chemicalId(chemicalId)
+                .changeType("SCRAP")
+                .quantity(quantity.negate())
+                .balanceAfter(balanceAfter)
+                .refType(refType)
+                .refId(refId)
+                .operator(operator)
+                .build());
+
+        log.info("报废 chemicalId={} 批次 {} {}，原因：{}，剩余 {}，来源 {}:{}", chemicalId,
+                batch.getBatchNo(), quantity, reason, balanceAfter, refType, refId);
+        return ScrapOutcome.ok(new ScrapResult(batchId, batch.getBatchNo(), quantity,
+                balanceAfter, reason, operator));
+    }
+
+    /**
+     * 管理员应急报废：把批次里不可用的量扣掉，并写一条台账流水。
      *
      * 过期批次在出库时被 FEFO 过滤掉，若没有报废出口，这些量会永远挂在批次表上：
      * 库存视图持续提示「未处理」，台账总量也降不下来。报废是过期、破损、实验废弃
@@ -315,38 +382,18 @@ public class StockService {
      *
      * 允许报废未过期批次（破损、变质、实验废弃），但必须写原因——
      * 台账要能回答「为什么少了」。校验批次归属，防止拿错批次跨试剂扣减。
+     *
+     * <p>这是应急入口，常规流程走 {@code /api/scraps} 的报废审批单。
+     * 历史语义保持不变：{@code refType=SCRAP}、{@code refId=batchId}。
      */
     @Transactional
     public ScrapResult scrap(Long chemicalId, Long batchId, ScrapRequest request, String operator) {
-        ChemicalBatch batch = batchRepository.findById(batchId)
-                .orElseThrow(() -> new ResourceNotFoundException("批次不存在: id=" + batchId));
-        if (!batch.getChemicalId().equals(chemicalId)) {
-            throw new BusinessException("批次 " + batch.getBatchNo() + " 不属于试剂 " + chemicalId);
+        ScrapOutcome outcome = tryScrap(chemicalId, batchId, request.quantity(), request.reason(),
+                "SCRAP", batchId, operator);
+        if (!outcome.success()) {
+            throw new BusinessException(outcome.failureMessage());
         }
-
-        int affected = batchRepository.deduct(batchId, request.quantity());
-        if (affected == 0) {
-            throw new BusinessException("报废量超过批次当前可用量，批次 " + batch.getBatchNo());
-        }
-
-        // 与出库一致：扣减成功后该行被本事务锁住，重新读出的才是确定余额。
-        BigDecimal balanceAfter = batchRepository.currentQuantity(batchId);
-
-        ledgerRepository.save(StockLedger.builder()
-                .batchId(batchId)
-                .chemicalId(chemicalId)
-                .changeType("SCRAP")
-                .quantity(request.quantity().negate())
-                .balanceAfter(balanceAfter)
-                .refType("SCRAP")
-                .refId(batchId)
-                .operator(operator)
-                .build());
-
-        log.info("报废 chemicalId={} 批次 {} {}，原因：{}，剩余 {}", chemicalId,
-                batch.getBatchNo(), request.quantity(), request.reason(), balanceAfter);
-        return new ScrapResult(batchId, batch.getBatchNo(), request.quantity(),
-                balanceAfter, request.reason(), operator);
+        return outcome.result();
     }
 
     /**

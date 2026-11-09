@@ -85,6 +85,16 @@ public class GlobalExceptionHandler {
                 .body(ApiResponse.fail(503, e.getMessage()));
     }
 
+    /**
+     * 数据状态在执行时已经变化。返回 409 而不是 400：请求内容没有错，
+     * 调用方刷新后重试即可（典型场景：报废审批时该批次余量已被别的单据扣走）。
+     */
+    @ExceptionHandler(ConflictException.class)
+    public ResponseEntity<ApiResponse<Void>> handleConflict(ConflictException e) {
+        log.warn("数据状态冲突: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(ApiResponse.fail(409, e.getMessage()));
+    }
+
     @ExceptionHandler(ResourceNotFoundException.class)
     public ResponseEntity<ApiResponse<Void>> handleNotFound(ResourceNotFoundException e) {
         log.warn("资源不存在: {}", e.getMessage());

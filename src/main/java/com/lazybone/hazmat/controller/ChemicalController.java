@@ -206,7 +206,12 @@ public class ChemicalController {
     }
 
     /**
-     * 报废：从某个批次扣掉不可用的量，必须写明原因。
+     * 管理员应急报废：从某个批次直接扣掉不可用的量，必须写明原因。
+     *
+     * <p>常规报废走 {@code POST /api/scraps} 的审批单（申请 → 审批 → 扣减）。
+     * 这个入口保留给应急场景：瓶子打碎、泄漏处置等需要当场销账的情况。
+     * 两条路径写出的台账用 {@code refType} 区分：这里是 {@code SCRAP}、
+     * {@code refId=batchId}；审批单是 {@code SCRAP_ORDER}、{@code refId=单据 id}。
      *
      * 路径把批次挂在试剂下面，语义上说明「批次属于这个试剂」；
      * Service 里还会再校验一次归属，防止调用方拼错 id 跨试剂扣减。
