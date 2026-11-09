@@ -91,4 +91,31 @@ class MsdsIndexVersionTest {
         assertThat(indexService.literalIndex().size()).isEqualTo(rolledBack.chunks());
         assertThat(searchService.search("甲醇 闪点", null, 5).hits()).isNotEmpty();
     }
+
+    @Test
+    void refreshIfVersionChangedFollowsAnotherInstanceSwitch() {
+        // 第一次重建建立可比较的基线；此时内存索引与 active 同源
+        indexService.rebuild();
+        assertThat(indexService.refreshIfVersionChanged()).isFalse();
+
+        MsdsIndexMeta before = metaRepository.findById(1).orElseThrow();
+        String current = before.getActiveVersion();
+        String previous = before.getPreviousVersion();
+        assertThat(previous).isNotNull();
+
+        // 模拟另一个实例切了 active：只改指针，不动内存索引
+        before.setActiveVersion(previous);
+        before.setPreviousVersion(current);
+        metaRepository.save(before);
+
+        assertThat(indexService.refreshIfVersionChanged())
+                .as("版本变化必须重建内存索引")
+                .isTrue();
+        assertThat(indexService.activeVersion()).isEqualTo(previous);
+        assertThat(indexService.literalIndex().size())
+                .isEqualTo(chunkRepository
+                        .findByIndexVersionOrderByCasNoAscSectionNoAscPartNoAsc(previous).size());
+        // 同一版本不会重复重建：否则每 30 秒都会扫一次全表
+        assertThat(indexService.refreshIfVersionChanged()).isFalse();
+    }
 }

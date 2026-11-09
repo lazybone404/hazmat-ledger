@@ -42,24 +42,51 @@ public class MsdsIndexBootstrap {
         this.aiProperties = aiProperties;
     }
 
+    /**
+     * 重建、恢复与编码三步各自兜底，互不连坐。
+     *
+     * <p>合成一个 try 的后果是：重建抛异常后，连「从库里恢复索引」和「刷新向量快照」
+     * 都不会执行，本来还能用的旧索引也一起丢掉。三步的失败后果不同——
+     * 重建失败还能用库里已有的块，向量刷新失败还能走字面检索，编码失败只影响新建文档——
+     * 所以分别捕获，最后一步失败了也不阻止前面已经就绪的功能。
+     */
     @EventListener(ApplicationReadyEvent.class)
     public void onReady() {
-        try {
-            if (chunkRepository.count() == 0) {
+        if (chunkRepository.count() == 0) {
+            try {
                 indexService.rebuild();
-            } else {
-                // 磁盘上的文件可能变过，但重启时先让服务可用，重建交给手动接口
-                indexService.refreshFromDatabase();
+            } catch (RuntimeException e) {
+                log.error("MSDS 索引重建失败，改为从库里恢复", e);
+                refreshFromDatabaseQuietly();
             }
-            // 先按库里已有的向量建快照，检索在编码完成前也能用上旧向量；
-            // 编码在后台线程里跑，不阻塞启动，结束后会再刷新一次快照
+        } else {
+            // 磁盘上的文件可能变过，但重启时先让服务可用，重建交给手动接口
+            refreshFromDatabaseQuietly();
+        }
+
+        // 先按库里已有的向量建快照，检索在编码完成前也能用上旧向量；
+        // 编码在后台线程里跑，不阻塞启动，结束后会再刷新一次快照
+        try {
             vectorService.refreshVectorIndex();
+        } catch (RuntimeException e) {
+            log.error("MSDS 向量快照刷新失败，检索暂时只用字面路", e);
+        }
+
+        try {
             if (aiProperties.isEncodeOnStartup()) {
                 encodeTaskDispatcher.requestEncoding(vectorService.activeVersion(), "startup");
             }
         } catch (RuntimeException e) {
+            log.error("启动时申请 MSDS 编码任务失败，可稍后手动 reindex", e);
+        }
+    }
+
+    private void refreshFromDatabaseQuietly() {
+        try {
+            indexService.refreshFromDatabase();
+        } catch (RuntimeException e) {
             // 索引失败不应该拖垮整个台账系统：检索退化为空结果，其他功能照常
-            log.error("MSDS 索引初始化失败，检索功能将不可用", e);
+            log.error("从库里恢复 MSDS 索引失败，检索功能将不可用", e);
         }
     }
 }

@@ -157,6 +157,22 @@ public class EncodeTaskService {
         }
     }
 
+    /**
+     * 删除终态（DONE / DEAD）且完成时间早于 {@code cutoff} 的任务，返回删除行数。
+     *
+     * <p>只清终态：PENDING / RUNNING 还在流程里，FAILED 是等待重试的证据。
+     * 清理由定时任务调用，异常向上抛，由任务自己记日志决定下一轮是否重试。
+     */
+    @Transactional
+    public int purgeFinishedBefore(LocalDateTime cutoff) {
+        int deleted = repository.deleteFinishedBefore(
+                List.of(MsdsEncodeTaskStatus.DONE, MsdsEncodeTaskStatus.DEAD), cutoff);
+        if (deleted > 0) {
+            log.info("清理编码任务: cutoff={}, deleted={}", cutoff, deleted);
+        }
+        return deleted;
+    }
+
     @Transactional(readOnly = true)
     public Optional<MsdsEncodeTask> find(Long id) {
         return repository.findById(id);
