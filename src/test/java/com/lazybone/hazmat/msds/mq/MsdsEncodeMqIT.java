@@ -5,7 +5,9 @@ import com.lazybone.hazmat.entity.MsdsEncodeTaskStatus;
 import com.lazybone.hazmat.msds.MsdsVectorService;
 import com.lazybone.hazmat.repository.MsdsChunkRepository;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -14,7 +16,9 @@ import org.testcontainers.containers.RabbitMQContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -28,9 +32,10 @@ import static org.awaitility.Awaitility.await;
  * </pre>
  * 没装 Docker 时 Testcontainers 会跳过。
  *
- * <p>默认模型是本地哈希，不联网；这里验证的是任务队列本身，
- * 不是模型质量。模型失败重试与 DLQ 由默认套件里的状态机测试覆盖，
- * 真实 broker 上只做一条成功路径，避免异步断言因环境波动变红。
+ * <p>默认模型是本地哈希，不联网；这里验证的是任务队列本身，不是模型质量。
+ * 成功路径走完整消费链；DLQ 只验证拓扑（直接向 DLX 发一条消息，看 DLQ 能否收到），
+ * 重试耗尽后的状态机由默认套件里的 {@code EncodeTaskMessageRecovererTest} 覆盖，
+ * 不在真实 broker 上等退避，避免异步断言因环境波动变红。
  */
 @Testcontainers(disabledWithoutDocker = true)
 @SpringBootTest(properties = {
@@ -73,6 +78,9 @@ class MsdsEncodeMqIT {
     @Autowired
     private RabbitAdmin rabbitAdmin;
 
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
+
     @Test
     void encodingTaskCompletesThroughRabbitMq() {
         // 确保交换机/队列/绑定已声明；监听容器启动与声明之间存在很短的时间窗
@@ -91,5 +99,25 @@ class MsdsEncodeMqIT {
 
         assertThat(vectorService.status().pending()).isZero();
         assertThat(vectorService.status().failed()).isZero();
+    }
+
+    /**
+     * 只验证拓扑：往 DLX 的路由键发一条消息，DLQ 能收到。
+     *
+     * <p>不经过消费端重试，避免等 2s/4s 退避造成异步断言不稳定；
+     * 「重试耗尽后标 DEAD 并拒绝消息」由默认套件里的
+     * {@code EncodeTaskMessageRecovererTest} 覆盖，两边各管一层。
+     */
+    @Test
+    void deadLetterExchangeRoutesToDlq() {
+        rabbitAdmin.initialize();
+        String marker = "it-dlq-" + UUID.randomUUID();
+        Message message = new Message(marker.getBytes(StandardCharsets.UTF_8));
+
+        rabbitTemplate.send("hazmat.msds.dlx", "msds.encode.dlq", message);
+
+        Message received = rabbitTemplate.receive("hazmat.msds.encode.dlq", 5000);
+        assertThat(received).as("消息应被路由到死信队列").isNotNull();
+        assertThat(new String(received.getBody(), StandardCharsets.UTF_8)).isEqualTo(marker);
     }
 }

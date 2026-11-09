@@ -135,6 +135,19 @@ class StocktakeTest {
     }
 
     @Test
+    @DisplayName("提交后不能再录入实盘量，已提交单据的差异不会被晚到的保存改写")
+    void recordAfterSubmitRejected() {
+        StocktakeResponse sheet = createSheet();
+        record(sheet.stocktakeNo(), itemOf(sheet, "ST-A"), "100");
+        record(sheet.stocktakeNo(), itemOf(sheet, "ST-B"), "50");
+        stocktakeService.submit(sheet.stocktakeNo(), OPERATOR);
+
+        BusinessException ex = assertThrows(BusinessException.class,
+                () -> record(sheet.stocktakeNo(), itemOf(sheet, "ST-A"), "0"));
+        assertTrue(ex.getMessage().contains("只有草稿状态"), "错误提示要说明当前状态不允许录入");
+    }
+
+    @Test
     @DisplayName("盘亏：确认后批次余量等于实盘量，写一条负的 ADJUST 流水，对账恢复一致")
     void shortageWritesNegativeAdjustAndBalanceStaysConsistent() {
         StocktakeResponse sheet = createSheet();
