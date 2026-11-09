@@ -13,6 +13,7 @@ import com.lazybone.hazmat.repository.ChemicalBatchRepository;
 import com.lazybone.hazmat.repository.ChemicalRepository;
 import com.lazybone.hazmat.repository.RequisitionLogRepository;
 import com.lazybone.hazmat.repository.RequisitionRepository;
+import com.lazybone.hazmat.repository.ScrapOrderRepository;
 import com.lazybone.hazmat.repository.StockLedgerRepository;
 import com.lazybone.hazmat.repository.StocktakeItemRepository;
 import com.lazybone.hazmat.repository.StocktakeRepository;
@@ -70,6 +71,7 @@ class SecurityIntegrationTest {
     @Autowired private ChemicalBatchRepository batchRepository;
     @Autowired private RequisitionRepository requisitionRepository;
     @Autowired private RequisitionLogRepository requisitionLogRepository;
+    @Autowired private ScrapOrderRepository scrapOrderRepository;
     @Autowired private StockLedgerRepository ledgerRepository;
     @Autowired private StocktakeRepository stocktakeRepository;
     @Autowired private StocktakeItemRepository stocktakeItemRepository;
@@ -80,6 +82,7 @@ class SecurityIntegrationTest {
     void setUp() {
         stocktakeItemRepository.deleteAll();
         stocktakeRepository.deleteAll();
+        scrapOrderRepository.deleteAll();
         requisitionLogRepository.deleteAll();
         requisitionRepository.deleteAll();
         ledgerRepository.deleteAll();
@@ -94,6 +97,20 @@ class SecurityIntegrationTest {
 
         chemicalId = chemicalService.create(new ChemicalRequest(
                 "CAS-SEC-001", "安全测试试剂", "易燃", "中", "mL", "AR 500mL", null, null)).getId();
+    }
+
+    @Test
+    @DisplayName("自助注册默认关闭：匿名调用返回 403，而不是 401")
+    void registrationIsForbiddenWhenSwitchOff() throws Exception {
+        mockMvc.perform(post("/api/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "username", "newcomer",
+                                "displayName", "新同事",
+                                "password", PASSWORD))))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value(403));
+        assertThat(userRepository.findByUsername("newcomer")).isEmpty();
     }
 
     private void createUser(String username, String displayName, UserRole role) {
@@ -359,6 +376,60 @@ class SecurityIntegrationTest {
                 .andExpect(jsonPath("$.data.status").value("DRAFT"))
                 .andExpect(jsonPath("$.data.createdBy").value("admin"))
                 .andExpect(jsonPath("$.data.items.length()").value(1));
+    }
+
+    @Test
+    @DisplayName("报废单：普通用户可提交、不能审批；审批员可批；他人不能撤销")
+    void scrapOrderFollowsRoleMatrix() throws Exception {
+        Long batchId = stockService.inbound(chemicalId,
+                new InboundRequest("SEC-SCRAP-1", new BigDecimal("50"), "柜 C-1",
+                        LocalDate.now().plusYears(1)), "admin").id();
+        String aliceToken = bearer(login("alice"));
+        String approverToken = bearer(login("approver1"));
+
+        MvcResult created = mockMvc.perform(post("/api/scraps")
+                        .header("Authorization", aliceToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "chemicalId", chemicalId,
+                                "batchId", batchId,
+                                "quantity", 10,
+                                "reason", "容器破损"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.applicant").value("alice"))
+                .andExpect(jsonPath("$.data.status").value("PENDING"))
+                .andReturn();
+        String scrapNo = objectMapper.readTree(
+                        created.getResponse().getContentAsString(StandardCharsets.UTF_8))
+                .path("data").path("scrapNo").asText();
+
+        mockMvc.perform(post("/api/scraps/" + scrapNo + "/review")
+                        .header("Authorization", aliceToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                Map.of("approved", true, "comment", "自己批"))))
+                .andExpect(status().isForbidden());
+
+        mockMvc.perform(post("/api/scraps/" + scrapNo + "/cancel")
+                        .header("Authorization", bearer(login("bob"))))
+                .andExpect(status().isBadRequest());
+
+        mockMvc.perform(post("/api/scraps/" + scrapNo + "/review")
+                        .header("Authorization", approverToken)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                                Map.of("approved", true, "comment", "同意"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value("APPROVED"));
+
+        // 普通用户查别人的报废单是 403；审批员可以
+        mockMvc.perform(get("/api/scraps?applicant=alice")
+                        .header("Authorization", bearer(login("bob"))))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/scraps?applicant=alice")
+                        .header("Authorization", approverToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.content.length()").value(1));
     }
 
     @Test

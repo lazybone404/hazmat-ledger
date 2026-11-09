@@ -56,11 +56,17 @@ public class StockLedger {
     @Column(nullable = false, precision = 12, scale = 3)
     private BigDecimal balanceAfter;
 
-    /** 引起这次变动的业务类型：INBOUND / REQUISITION / SCRAP / ADJUST */
+    /**
+     * 引起这次变动的业务类型：INBOUND / REQUISITION / SCRAP / SCRAP_ORDER / ADJUST。
+     *
+     * <p>注意 {@code refId} 的含义随它变化：{@code SCRAP} 的历史流水里是批次 id，
+     * {@code SCRAP_ORDER} 是报废单 id，{@code REQUISITION} 是申请 id。
+     * 报表和前端必须先看 refType 再解释 refId，不能只按 refId 关联。
+     */
     @Column(nullable = false, length = 20)
     private String refType;
 
-    /** 引起变动的业务 id */
+    /** 引起变动的业务 id，语义取决于 {@link #refType}，见上 */
     private Long refId;
 
     @Column(nullable = false, length = 100)
