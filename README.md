@@ -46,7 +46,7 @@
 ```bash
 export JAVA_HOME="/c/Program Files/Java/jdk-21.0.11"   # 见下方「环境要求」
 ./mvnw spring-boot:run        # 端口 8090，启动后自动灌 18 条试剂档案、21 个批次
-./mvnw test                   # 228 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
+./mvnw test                   # 251 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
                               # MySQL 实机与 RabbitMQ 链路是 *IT（4 + 1 个），不参与默认执行，见下文
 ```
 
@@ -91,8 +91,9 @@ MySQL 下如果不想灌种子数据，加 `--hazmat.seed.enabled=false`。
 ./mvnw -Dapi.version=1.44 -Dtest=MySqlMigrationIT test
 ```
 
-它验证 V1–V11 在 MySQL 8.4 上一次跑完、`ddl-auto=validate` 能启动、中文往返不乱码、
-CAS 对的唯一约束与 `CHECK` 都生效、分页与排序结果正确。Docker 版本较低的机器不需要 `api.version`。
+它验证 V1–V17 在 MySQL 8.4 上一次跑完、`ddl-auto=validate` 能启动、中文往返不乱码、
+CAS 对的唯一约束与 `CHECK` 都生效、分页与排序结果正确，并断言号段表、报废单表、盘点复核列、
+告警表与索引锁表的列和索引真的建出来了。Docker 版本较低的机器不需要 `api.version`。
 
 ### 生产配置（prod profile）
 
@@ -193,6 +194,7 @@ docker compose start rabbitmq                       # relay 默认 30 秒内补�
 | 方法 | 路径 | 权限 | 说明 |
 |---|---|---|---|
 | POST | `/api/auth/login` | 公开 | 登录，返回 JWT |
+| POST | `/api/auth/register` | 公开（默认关闭） | 自助注册。`hazmat.security.registration.enabled=false` 时返回 403；打开后只创建**待启用**的 USER 账号，仍需管理员启用；用户名已存在时返回同样的成功，不暴露账号是否存在 |
 | GET | `/api/auth/me` | 登录 | 当前用户信息 |
 | POST | `/api/auth/password` | 登录 | 本人改密（需旧密码）。改完 `token_version` +1，**当前 token 也立即失效**，需重新登录 |
 | POST | `/api/auth/logout-all` | 登录 | 撤销本账号全部 token（各设备一起下线） |
@@ -210,7 +212,7 @@ docker compose start rabbitmq                       # relay 默认 30 秒内补�
 | GET | `/api/chemicals/{id}/ledger?page=&size=&sort=` | 登录 | 某试剂的出入库流水分页，默认按发生时间倒序 |
 | POST | `/api/chemicals/{id}/batches` | ADMIN | 入库，新建批次 |
 | POST | `/api/chemicals/{id}/batches/{batchId}/open` | ADMIN | 开封：记录开封时间与操作人；档案配了 `postOpenDays` 时把可用截止日提前为 `min(包装有效期, 开封日 + 天数)` |
-| POST | `/api/chemicals/{id}/batches/{batchId}/scrap` | ADMIN | 报废：从批次扣减不可用量，必须写原因 |
+| POST | `/api/chemicals/{id}/batches/{batchId}/scrap` | ADMIN | **应急报废**：直接扣减并写 `SCRAP` 流水，必须写原因。常规报废走下面的 `/api/scraps` 申请审批流 |
 | GET | `/api/chemicals/{id}/stock` | 登录 | 库存视图：批次明细 + 可用量 + 效期预警 |
 | GET | `/api/chemicals/{id}/reconcile` | 登录 | 对账：逐批次「批次余额 vs 最后一笔流水余额」，外加汇总量交叉验证，返回 `consistent` |
 | POST | `/api/stocktakes` | ADMIN | 建盘点单。不传 `chemicalIds` 为全盘；建单时把每个批次的账面量冻结成快照 |
@@ -218,15 +220,22 @@ docker compose start rabbitmq                       # relay 默认 30 秒内补�
 | GET | `/api/stocktakes/{stocktakeNo}` | 登录 | 盘点单详情 + 全部明细（账面 / 实盘 / 差异） |
 | PUT | `/api/stocktakes/{stocktakeNo}/items/{itemId}` | ADMIN | 录入某批次实盘量，仅 `DRAFT` 可改；重复录入即覆盖 |
 | POST | `/api/stocktakes/{stocktakeNo}/submit` | ADMIN | 提交。任一批次未录入即 400，并列出漏录的批次号 |
-| POST | `/api/stocktakes/{stocktakeNo}/confirm` | ADMIN | 确认并调账：差异写成 `ADJUST` 流水，批次余额改为实盘量 |
+| POST | `/api/stocktakes/{stocktakeNo}/review` | ADMIN | 复核签字（`SUBMITTED → REVIEWED`），只留痕不动库存。打开 `hazmat.stocktake.require-review` 时确认前必须走这一步 |
+| POST | `/api/stocktakes/{stocktakeNo}/confirm` | ADMIN | 确认并调账：差异写成 `ADJUST` 流水，批次余额改为实盘量。`require-review=true` 时只接受 `REVIEWED`；`require-separate-confirmer=true` 时确认人不能是提交人 |
 | POST | `/api/stocktakes/{stocktakeNo}/cancel` | ADMIN | 撤销，不调账。已确认的不能撤销 |
 | POST | `/api/requisitions` | 登录 | 提交领用申请，申请人取当前账号 |
 | GET | `/api/requisitions/{reqNo}` | 本人 / APPROVER / ADMIN | 申请详情 + 完整流转时间线 |
+| GET | `/api/requisitions/{reqNo}/safety` | 本人 / APPROVER / ADMIN | **安全摘要**：固定取该试剂 MSDS 第 2/4/6/8 节（危险性概述、急救、泄漏应急、个体防护），正文截断到 500 字。没有索引过该 CAS 时 `available=false`；有索引但缺节时 `available=true` + `message` 说明缺哪几节，不伪造内容 |
 | GET | `/api/requisitions?applicant=&status=&from=&to=&page=&size=&sort=` | 本人 / APPROVER / ADMIN | 申请分页列表；不传 `applicant` 默认查自己，`from`/`to` 为自然日 |
 | POST | `/api/requisitions/{reqNo}/review` | APPROVER / ADMIN | 审批（通过 / 驳回）。`hazardLevel=高` 的试剂要**两位不同审批人**各批一次，且申请人不能批自己的 |
 | POST | `/api/requisitions/{reqNo}/issue` | ADMIN | 出库 |
 | POST | `/api/requisitions/{reqNo}/close` | ADMIN | 核销 |
 | POST | `/api/requisitions/{reqNo}/cancel` | 登录（仅本人） | 撤回 |
+| POST | `/api/scraps` | 登录 | 提交报废申请（试剂、批次、数量、原因），申请人取当前账号 |
+| GET | `/api/scraps?applicant=&status=&page=&size=&sort=` | 本人 / APPROVER / ADMIN | 报废单分页；普通用户不传 `applicant` 时只看自己，看别人返回 403 |
+| GET | `/api/scraps/{scrapNo}` | 本人 / APPROVER / ADMIN | 报废单详情 |
+| POST | `/api/scraps/{scrapNo}/review` | APPROVER / ADMIN | 审批报废单。通过时同事务扣减并写 `SCRAP_ORDER` 流水；可用量已变化则单据自动置 `REJECTED` 并返回 409。不能审批自己提交的单 |
+| POST | `/api/scraps/{scrapNo}/cancel` | 登录（仅本人） | 撤销 `PENDING` 的报废单 |
 | GET | `/api/msds/search?q=&casNo=&docType=&topK=` | 登录 | 检索知识片段（MSDS / 国标 / SOP）。`q` 必填、上限 200 字符，`casNo` 与 `docType` 可选，`topK` 默认 5、上限 20。返回 `MsdsSearchResult`：命中列表（每条带 `sources`、`docType`、`clauseNo`）+ 降级原因 + 索引状态 |
 | GET | `/api/msds/ask?q=&casNo=&topK=` | 登录 | 检索并作答。返回 `MsdsAnswer`：`answerable` / `generated` / `answer` / `citations` / `degraded` / `degradedReason`。引用由后端从命中生成，模型只能选编号（最多前 5 条）；无模型或调用失败退回原文摘录（`generated=false`），无依据时 `answerable=false` |
 | POST | `/api/msds/reindex` | ADMIN | 扫描知识源目录增量落块；四元组变了就作废旧向量，然后提交编码任务。返回 `rebuild`、`vectors` 与 `encodeTaskId`（MQ 关闭时为 null） |
@@ -302,15 +311,19 @@ PENDING ──审批通过（普通试剂，一人）─────────
 盘点单的状态机同样写在枚举里（`StocktakeStatus.canTransitionTo`）：
 
 ```
-DRAFT ──提交（要求全部实盘量已录）──> SUBMITTED ──确认并调账──> CONFIRMED
-  │                                      │
-  └────────────撤销────────┬─────────────┘
+DRAFT ──提交（要求全部实盘量已录）──> SUBMITTED ──复核签字──> REVIEWED ──确认并调账──> CONFIRMED
+  │                                      │            │
+  └────────────撤销────────┬─────────────┴──撤销──────┘
                            └────────────> CANCELLED
 ```
 
 `CONFIRMED` / `CANCELLED` 是终态：防止「已取消的单又被确认」或重复确认把同一笔差异调两次。
 `DRAFT` 与 `SUBMITTED` 分开，是因为「录入」和「确认」是两个动作——合成一步的话，
 手滑输错一个 0 就直接改进台账了。
+
+复核档 `REVIEWED` 是可选的：`hazmat.stocktake.require-review=false` 时 `SUBMITTED` 可以直接确认，
+`review` 接口只做留痕；打开后必须先复核。`hazmat.stocktake.require-separate-confirmer=true`
+时复核人和确认人都不能是提交人，单管理员部署会走不完整流程——默认关闭就是这个原因。
 
 ---
 
@@ -371,10 +384,13 @@ UPDATE chemical_batch SET available_quantity = available_quantity - :qty
 - **`BigDecimal` 不用 `double`**：0.001 mL 是日常精度，double 表示不了 0.1，累加几十次就对不上账。
 - **流水表存 `balanceAfter`**：对账从「累加全部历史」变成「比最后一笔」，而且漏记一笔立刻能看出来。
 - **出库按效期升序但不含过期**：按效期是为了减少浪费；过期是报废不是临期，必须过滤掉。
-- **单号用日期 + 进程内自增序号**（`REQ20261106A1B2C3D4`）：避开了「查今天最大号 + 1」这个额外并发点。
-  最初是 4 位随机数，写路径压测里 734 次并发建单撞了 72 次唯一索引（万分之一空间，生日悖论），
-  每次撞号都是一个 500。改成进程内自增后，单 JVM 内确定性唯一；多实例仍可能撞，唯一约束冲突
-  会翻译成 400 业务错误让调用方重提，而不是 500。理由见 `common/DocumentNoGenerator`。
+- **单号用数据库号段**（`REQ20261106A1B2C3D4`）：分配点在 `document_no_segment` 表，
+  一次取一段（默认 100 个），段内由进程自增。历史背景：最初的 4 位随机数在写路径压测里
+  734 次并发建单撞了 72 次唯一索引（万分之一空间，生日悖论），每次撞号都是一个 500；
+  改成进程内自增解决了单 JVM 的问题，但多实例仍各从随机位置起算。号段把分配收敛到数据库，
+  两个实例拿到互不相交的区间。代价是**允许跳号**——业务事务回滚时已分配的号不退回，
+  单号只要求唯一、可读、不要求连续。号段缓存落后于库时（手工插号、库被恢复）插入仍会撞唯一索引，
+  建单入口统一丢弃本地段并重试一次，还撞才返回 400。见 `DocumentNoService` 与 D22。
 
 ### 4.4 （主线一）双人复核：加一个状态，而不是加一个计数
 
@@ -592,10 +608,14 @@ src/main/java/com/lazybone/hazmat/
 │                    AppUser 用户 / UserRole 角色 / MsdsChunk MSDS 切块（含 hash 与 vector）
 │                    ChemicalIncompatibility 禁忌混放关系（CAS 对 + 原因 + 出处）
 │                    MsdsEncodeTask 编码任务（状态机 + claim 租约）
-├── repository/      14 个；扣减、盘点调账、开封 CAS 与状态 CAS 的关键 SQL 都在 ChemicalBatchRepository
+│                    ScrapOrder 报废申请 / ScrapOrderStatus 报废状态机
+│                    DocumentNoSegment 业务单号号段
+├── repository/      15 个；扣减、盘点调账、开封 CAS 与状态 CAS 的关键 SQL 都在 ChemicalBatchRepository
 ├── service/         StockService 入库出库与对账（核心） / RequisitionService 流程（核心）
 │                    StocktakeService 盘点建单与调账（核心） / ChemicalService
-│                    ChemicalSafetyService 台账与知识库的连接点（试剂 id → CAS → 检索）
+│                    ScrapOrderService 报废申请、审批与自动驳回
+│                    DocumentNoService 数据库号段 + 进程内块缓存
+│                    ChemicalSafetyService 台账与知识库的连接点（试剂 id → CAS → 检索 / 安全摘要）
 │                    IncompatibilityService 在库试剂两两比对、冲突与未覆盖分开返回
 ├── msds/            MsdsChunker 按章节切块 / MsdsIndexService 增量落库
 │                    MsdsLiteralIndex 内存倒排 / MsdsQueryExpander 同义词
@@ -605,9 +625,9 @@ src/main/java/com/lazybone/hazmat/
 │                    SearchConcurrencyLimiter 检索并发闸门
 │                    MsdsRetrievalProperties 融合深度与权重
 │                    ai/ 云端与本地哈希 embedding 客户端、向量编解码
-├── controller/      AuthController 登录 / ChemicalController / RequisitionController
-│                    StocktakeController 盘点流程 / MsdsController
-│                    IncompatibilityController 全实验室混放检查
+├── controller/      AuthController 登录与自助注册 / ChemicalController / RequisitionController
+│                    StocktakeController 盘点流程 / ScrapController 报废审批
+│                    MsdsController / IncompatibilityController 全实验室混放检查
 ├── report/          只读报表（MyBatis-Plus）：ReportMapper + XML，库存汇总与出入库趋势
 ├── security/        SecurityConfig JWT 过滤链与角色 / JwtService 签发
 │                    LoginAttemptGuard 登录失败计数与短时锁定
@@ -626,7 +646,9 @@ tools/bench/         run-read.sh 读路径压测编排；Bench 读路径、Write
 
 src/main/resources/db/migration/   V1 表结构、V2 分页复合索引、V3 盘点表、V4 开封字段、V5 批次号唯一索引、
                                    V6 禁忌关系表、V7 知识文档与块维度、V8 token 版本、V9 索引版本台账、
-                                   V10 禁忌依据字段；Hibernate 只做 validate，不自动建表
+                                   V10 禁忌依据字段、V11 编码任务表、V12 单号号段、V13 报废单表、
+                                   V14 盘点复核列、V15 运维告警表、V16 索引重建行锁、V17 编码任务完成索引；
+                                   Hibernate 只做 validate，不自动建表
 src/main/resources/mapper/         报表 XML（ReportMapper.xml），只有只读 SELECT
 src/main/resources/msds/           18 份按 GB/T 16483 的 16 节结构整理的演示文本（{casNo}.md）
 src/test/java/com/lazybone/hazmat/
@@ -639,15 +661,18 @@ src/test/java/com/lazybone/hazmat/
 ├── ResilienceTest          登录失败锁定、探针匿名可达、检索并发闸门
 ├── ReportTimeoutTest       报表超时/连接池耗尽译成 503，SQL 错误仍走 500
 ├── StocktakeTest           建单快照、盘盈盘亏入账、零差异也校验基准、整单回滚、对账
+├── StocktakeReviewTest     复核开关打开时的三步流程、提交人不能复核/确认、草稿不能复核
 ├── BatchOpeningTest        开封留痕、可用期取 min、重复/并发开封、过期后不再出库、四处口径统一
-├── ScrapTest               报废闭环：过期批次出口、跨试剂拒绝、30 线程不超扣
-├── ChemicalSafetyTest      详情接口、安全入口、无 MSDS 的 available=false、401/404/400
+├── ScrapTest               应急报废：过期批次出口、跨试剂拒绝、30 线程不超扣
+├── ScrapOrderTest          报废审批：状态机、自批拒绝、扣一次、驳回不扣、并发只成功一次、余量变化自动驳回
+├── ChemicalSafetyTest      详情接口、安全入口、领用安全摘要、无 MSDS 的 available=false、跨用户 403、401/404/400
+├── RegistrationIntegrationTest  自助注册：待启用账号、管理员启用后可登录、重复用户名不暴露存在性
 ├── IncompatibilityTest     同柜/分柜/未覆盖三分类、多柜位求交集、无规则显式未覆盖、依据三态与覆盖率、401/404
 ├── entity/ChemicalIncompatibilityTest  规则对归一化、拒绝自对与空值
 ├── seed/IncompatibilitySeedDataTest    种子 CAS 拼写、重复对、出处完整性、依据字段
 ├── QuantityRangeTest       四个数量入口超过 DECIMAL(12,3) 上限时被校验挡下（400 而非 500）
-├── common/DocumentNoGeneratorTest  10 万单号并发生成不重复、格式含日期
-├── MySqlMigrationIT        MySQL 8.4 实机：Flyway V1–V11、中文往返、唯一约束与 CHECK、分页（*IT，默认不跑）
+├── service/DocumentNoServiceTest  同实例并发不重、两个实例共享分配器不重、号段推进、撞号后重新申请
+├── MySqlMigrationIT        MySQL 8.4 实机：Flyway V1–V17、新表列与索引、中文往返、唯一约束与 CHECK、分页（*IT，默认不跑）
 ├── MsdsEncodeMqIT          RabbitMQ 实机：投递 → claim → 编码 → DONE（*IT，默认不跑，需 Docker）
 └── msds/                   MsdsChunkerTest 切块 / MsdsSearchTest 检索与增量重建
                             MsdsFusionTest 融合元数据 / MsdsSearchDegradeTest 降级
@@ -676,16 +701,21 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
 
 ## 6. 已知缺口（被问到要主动说）
 
-- 用户体系没有注册与找回密码：账号由管理员建（或种子数据），忘记密码只能由管理员重置。
+- 用户体系的自助注册默认关闭，且没有邮箱验证与找回密码：开启后注册只产生待启用账号，
+  仍需管理员启用；忘记密码只能由管理员重置。
   停用、改角色、改密、logout-all 都会自增 `app_user.token_version`，旧 token 立即失效；
   但校验带 30 秒本地缓存，**多实例部署时最迟 30 秒生效**，单实例由管理接口主动清缓存。
   token 撤销版本存在主库上，每个登录用户的首次校验要多一次索引查询（之后 30 秒走缓存）。
   台账里的申请人/审批人存用户名而不是外键，用户改名不会影响历史签名，
   但显示名与账号的对应关系要另外维护。
 - 双人复核只按 `hazardLevel` 分了「一人 / 两人」两档，没有配「哪些试剂要三级审批」。新增档位要动状态机。
-- 报废目前是直接扣减 + 留痕（记录原因和操作人），没有独立的报废单与审批流；若合规要求审批，应在 `scrap` 前加一层单据状态机。
-- 盘点：提交人与确认人分开只留痕、不强制（单管理员部署下强制会卡死流程）；全盘一次生成
-  「有库存批次数」条明细，批次上千时要分批建单；差异直接调账，没有「确认后仍需复核」的第二道关。
+- 报废已补成「申请 → 审批 → 扣减」的单据流（`/api/scraps`），管理员应急入口
+  `/api/chemicals/{id}/batches/{batchId}/scrap` 仍保留。两张单在创建时都通过「不超过当前可用量」
+  校验的话，第二张审批时扣减会失败：现在的处理是把单据置 `REJECTED`、写明原因并返回 409，
+  而不是停在 `PENDING` 让人反复重试。台账里历史 `SCRAP` 流水的 `refId` 是 `batchId`，
+  新 `SCRAP_ORDER` 是单据 id，**报表必须先看 `refType` 再解释 `refId`**。
+- 盘点：提交人 / 复核人 / 确认人分离与「必须先复核」都由开关控制，默认关闭——单管理员部署下
+  强制会卡死流程。全盘一次生成「有库存批次数」条明细，批次上千时要分批建单。
 - 开封管理：开封不可撤销（点错了只能报废或另开一批）；`postOpenDays` 事后修改不回溯已开封批次，
   可用期在开封那一刻就已落库；开封是「整瓶一次性开启」的粗粒度模型，没有「分次取用、剩余多少天」
   的连续跟踪，也不支持一瓶同时用于多个实验的用量分摊。
@@ -723,9 +753,10 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
   没有多实例竞争；数字用于比较链路之间的量级，不能直接当生产容量。已知两个规模边界：
   出库按效期扫描该试剂**全部**可用批次，批次数从个位数涨到约 5000 时会翻倍（p50 183→362 ms）；
   一次全盘会为每个有库存批次生成一条明细，批次上千时建单与录入都会变重，应改成分批盘。
-- 单号是「日期 + 进程内自增序号」，多实例之间没有协调：两个实例同日理论上可能撞号。
-  唯一索引兜底并把冲突翻译成 400 业务错误（可重提），但这意味着**调用方需要能处理这条
-  业务错误并重试**；要彻底消除应改成数据库序列或号段服务。
+- 单号已改为数据库号段（`document_no_segment`），两个实例拿到互不相交的区间。仍然**允许跳号**：
+  业务事务回滚或 JVM 重启都会丢弃未用完的号段。号段分配用 `REQUIRES_NEW`，会短暂占用第二个连接，
+  建单不是高频路径时够用；建单 QPS 大幅上升时要把分配改成独立服务或预取更多号段。
+  手工插号或库被恢复后本地号段可能落后，建单入口会丢弃本地段重试一次。
 - 过载保护只在单实例内生效：登录失败计数与检索许可都在进程内存里，多副本各算各的；
   容量参数（连接池 10 / 等 3 秒、语句超时 5 秒、检索 4 个许可）是按小规模估的初值，
   没有压测数据支撑，上线后要照实际指标回头调。

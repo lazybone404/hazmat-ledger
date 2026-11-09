@@ -35,11 +35,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  *
  * <p>验证四件事：
  * <ol>
- *   <li>Flyway V1–V11 在 MySQL 8.4 上能按顺序执行完，应用能以 {@code ddl-auto=validate} 启动；</li>
+ *   <li>Flyway V1–V17 在 MySQL 8.4 上能按顺序执行完，应用能以 {@code ddl-auto=validate} 启动；</li>
  *   <li>utf8mb4 下中文名称写入/读出不变形；</li>
  *   <li>禁忌关系的 {@code CHECK (cas_a < cas_b)} 与唯一约束在 MySQL 上真的会拦；</li>
  *   <li>分页查询在真实 MySQL 上总数、页大小与排序都正确。</li>
  * </ol>
+ *
+ * <p>V12–V17 的列与索引在这里单独断言：它们都是「代码在 H2 上能跑、但 MySQL 建表语法
+ * 或类型不兼容就会静默少东西」的地方，只跑 H2 证明不了实机可用。
  */
 @Testcontainers(disabledWithoutDocker = true)
 @ActiveProfiles("mysql")
@@ -72,12 +75,13 @@ class MySqlMigrationIT {
     private ChemicalService chemicalService;
 
     @Test
-    void flywayAppliesEveryMigrationAndV11TableExists() {
+    void flywayAppliesEveryMigrationAndAllTablesExist() {
         List<String> versions = jdbcTemplate.queryForList(
                 "SELECT version FROM flyway_schema_history WHERE success = 1 ORDER BY installed_rank",
                 String.class);
         assertThat(versions).containsExactly(
-                "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11");
+                "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11",
+                "12", "13", "14", "15", "16", "17");
 
         List<String> basisColumns = jdbcTemplate.queryForList(
                 "SELECT column_name FROM information_schema.columns "
@@ -99,7 +103,48 @@ class MySqlMigrationIT {
                         + "WHERE table_schema = DATABASE() AND table_name = 'msds_encode_task'",
                 String.class);
         assertThat(taskIndexes).contains(
-                "idx_msds_encode_task_status", "idx_msds_encode_task_version");
+                "idx_msds_encode_task_status", "idx_msds_encode_task_version",
+                "idx_msds_encode_task_finished");
+
+        // V12：号段三行预置，业务建单不依赖进程内自增
+        List<String> prefixes = jdbcTemplate.queryForList(
+                "SELECT prefix FROM document_no_segment ORDER BY prefix", String.class);
+        assertThat(prefixes).containsExactlyInAnyOrder("REQ", "SCRAP", "ST");
+
+        // V13：报废单表、快照批次号与唯一单号
+        List<String> scrapColumns = jdbcTemplate.queryForList(
+                "SELECT column_name FROM information_schema.columns "
+                        + "WHERE table_schema = DATABASE() AND table_name = 'scrap_order'",
+                String.class);
+        assertThat(scrapColumns).contains(
+                "scrap_no", "chemical_id", "batch_id", "batch_no", "quantity",
+                "reason", "status", "applicant", "reviewer", "review_comment",
+                "created_at", "reviewed_at", "version");
+        assertThat(indexNames("scrap_order")).contains(
+                "uk_scrap_order_no", "idx_scrap_order_status_created",
+                "idx_scrap_order_applicant_created");
+
+        // V14：盘点复核三列可空，历史盘点单保持 NULL
+        List<String> stocktakeColumns = jdbcTemplate.queryForList(
+                "SELECT column_name FROM information_schema.columns "
+                        + "WHERE table_schema = DATABASE() AND table_name = 'stocktake'",
+                String.class);
+        assertThat(stocktakeColumns).contains("reviewed_by", "reviewed_at", "review_comment");
+        Integer nullable = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                        + "WHERE table_schema = DATABASE() AND table_name = 'stocktake' "
+                        + "AND column_name IN ('reviewed_by', 'reviewed_at', 'review_comment') "
+                        + "AND is_nullable = 'YES'", Integer.class);
+        assertThat(nullable).isEqualTo(3);
+
+        // V15：告警指纹唯一
+        assertThat(indexNames("ops_alert"))
+                .contains("uk_ops_alert_fingerprint", "idx_ops_alert_resolved_last_seen");
+
+        // V16：单行行锁表，预置 id=1
+        Integer lockRows = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM msds_index_lock WHERE id = 1", Integer.class);
+        assertThat(lockRows).isEqualTo(1);
 
         // 连接级别也确认一次：迁移没有把库降级成 latin1
         String charset = jdbcTemplate.queryForObject(
@@ -152,6 +197,13 @@ class MySqlMigrationIT {
         assertThat(second.getContent()).hasSize(2);
         assertThat(second.getContent().get(0).getId())
                 .isGreaterThan(first.getContent().get(1).getId());
+    }
+
+    private List<String> indexNames(String table) {
+        return jdbcTemplate.queryForList(
+                "SELECT DISTINCT index_name FROM information_schema.statistics "
+                        + "WHERE table_schema = DATABASE() AND table_name = ?",
+                String.class, table);
     }
 
     private void insertRule(String casA, String casB) {
