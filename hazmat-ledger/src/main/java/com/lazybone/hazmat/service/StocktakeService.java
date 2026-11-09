@@ -1,7 +1,6 @@
 package com.lazybone.hazmat.service;
 
 import com.lazybone.hazmat.common.BusinessException;
-import com.lazybone.hazmat.common.DocumentNoGenerator;
 import com.lazybone.hazmat.common.ResourceNotFoundException;
 import com.lazybone.hazmat.dto.StocktakeCreateRequest;
 import com.lazybone.hazmat.dto.StocktakeItemRequest;
@@ -19,13 +18,16 @@ import com.lazybone.hazmat.repository.StockLedgerRepository;
 import com.lazybone.hazmat.repository.StocktakeItemRepository;
 import com.lazybone.hazmat.repository.StocktakeRepository;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -42,6 +44,9 @@ import java.util.stream.Collectors;
  * 都读同一个数字。盘点是把两条线对上的唯一手段，差异必须落成 ADJUST 流水，
  * 不能直接改数字——台账只增不改。
  *
+ * <p>复核档（{@code REVIEWED}）与「提交人 / 复核人 / 确认人分离」都由配置开关控制，
+ * 默认关闭，避免单管理员部署被流程卡死。开关只加前置判断，不改变调账逻辑。
+ *
  * <b>三个关键决定：</b>
  * <ol>
  *   <li><b>账面量在建单时冻结</b>（{@code StocktakeItem.bookQuantity}）。实盘量的语义是
@@ -56,9 +61,9 @@ import java.util.stream.Collectors;
 @Service
 public class StocktakeService {
 
-    /** 「未完成」的盘点状态。建单时要挡住同一批次被两张单同时盘 */
+    /** 「未完成」的盘点状态。建单时要挡住同一批次被两张单同时盘；复核中也算未完成 */
     private static final List<StocktakeStatus> OPEN_STATUSES =
-            List.of(StocktakeStatus.DRAFT, StocktakeStatus.SUBMITTED);
+            List.of(StocktakeStatus.DRAFT, StocktakeStatus.SUBMITTED, StocktakeStatus.REVIEWED);
 
     private static final String CONFLICT_MESSAGE = "这张盘点单刚被其他人处理过，请刷新后重试";
 
@@ -67,17 +72,33 @@ public class StocktakeService {
     private final ChemicalBatchRepository batchRepository;
     private final ChemicalRepository chemicalRepository;
     private final StockLedgerRepository ledgerRepository;
+    private final DocumentNoService documentNoService;
+    private final TransactionTemplate createTx;
+
+    /** true 时 SUBMITTED 不能直接确认，必须先经过 REVIEWED */
+    private final boolean requireReview;
+    /** true 时复核人、确认人都不能等于提交人 */
+    private final boolean requireSeparateConfirmer;
 
     public StocktakeService(StocktakeRepository stocktakeRepository,
                             StocktakeItemRepository itemRepository,
                             ChemicalBatchRepository batchRepository,
                             ChemicalRepository chemicalRepository,
-                            StockLedgerRepository ledgerRepository) {
+                            StockLedgerRepository ledgerRepository,
+                            DocumentNoService documentNoService,
+                            PlatformTransactionManager transactionManager,
+                            @Value("${hazmat.stocktake.require-review:false}") boolean requireReview,
+                            @Value("${hazmat.stocktake.require-separate-confirmer:false}")
+                            boolean requireSeparateConfirmer) {
         this.stocktakeRepository = stocktakeRepository;
         this.itemRepository = itemRepository;
         this.batchRepository = batchRepository;
         this.chemicalRepository = chemicalRepository;
         this.ledgerRepository = ledgerRepository;
+        this.documentNoService = documentNoService;
+        this.createTx = new TransactionTemplate(transactionManager);
+        this.requireReview = requireReview;
+        this.requireSeparateConfirmer = requireSeparateConfirmer;
     }
 
     /** 盘点单 + 明细。详情接口一次返回，理由同申请详情 */
@@ -91,8 +112,22 @@ public class StocktakeService {
      * 先确认的那张一旦调账，后一张的条件更新必然失败。与其让人盘完几十条才发现，
      * 不如建单时就说清楚。条件更新仍然保留——「未完成」到「确认」之间库存还可能被改。
      */
-    @Transactional
     public Stocktake create(StocktakeCreateRequest request, String operator) {
+        try {
+            return createTx.execute(status -> createOnce(request, operator));
+        } catch (DataIntegrityViolationException e) {
+            // 号段缓存可能落后于数据库；丢弃本地段后换新事务重试一次
+            log.info("盘点单号撞唯一索引，丢弃本地号段后重试");
+            documentNoService.invalidate("ST");
+            try {
+                return createTx.execute(status -> createOnce(request, operator));
+            } catch (DataIntegrityViolationException retry) {
+                throw new BusinessException("盘点单号生成冲突，请重新提交");
+            }
+        }
+    }
+
+    private Stocktake createOnce(StocktakeCreateRequest request, String operator) {
         List<ChemicalBatch> batches = (request.chemicalIds() == null || request.chemicalIds().isEmpty())
                 ? batchRepository.findAllWithStock()
                 : batchRepository.findAllWithStockByChemicalIds(request.chemicalIds());
@@ -111,20 +146,13 @@ public class StocktakeService {
             throw new BusinessException("以下批次已在未完成的盘点单里，请先完成或撤销那张单：" + batchNos);
         }
 
-        Stocktake stocktake;
-        try {
-            // 先 flush 再写明细：单号撞唯一索引时这里就抛出来，此时还没有写入任何明细
-            stocktake = stocktakeRepository.saveAndFlush(Stocktake.builder()
-                    .stocktakeNo(nextStocktakeNo())
-                    .status(StocktakeStatus.DRAFT)
-                    .remark(request.remark())
-                    .createdBy(operator)
-                    .build());
-        } catch (DataIntegrityViolationException e) {
-            // 单号是 32 位随机序号，多实例部署时仍可能撞上唯一索引。
-            // 这是可重试的冲突，不是服务端故障，返回业务错误而不是 500
-            throw new BusinessException("盘点单号生成冲突，请重新提交");
-        }
+        // 先 flush 再写明细：单号撞唯一索引时这里就抛出来，此时还没有写入任何明细
+        Stocktake stocktake = stocktakeRepository.saveAndFlush(Stocktake.builder()
+                .stocktakeNo(nextStocktakeNo())
+                .status(StocktakeStatus.DRAFT)
+                .remark(request.remark())
+                .createdBy(operator)
+                .build());
 
         itemRepository.saveAll(batches.stream()
                 .map(b -> StocktakeItem.builder()
@@ -209,6 +237,34 @@ public class StocktakeService {
     }
 
     /**
+     * 复核：SUBMITTED → REVIEWED。只是签字，不动库存。
+     *
+     * <p>打开 {@code hazmat.stocktake.require-review} 时，确认必须经过这一步；
+     * 关闭时也可以调用，作为「我看过了」的留痕，但不会阻塞确认。
+     *
+     * <p>打开 {@code hazmat.stocktake.require-separate-confirmer} 时拒绝提交人自己复核。
+     * 「复核」的意义就是第二个人看一眼，自己核自己等于没有复核。
+     */
+    @Transactional
+    public Stocktake review(String stocktakeNo, String reviewer, String comment) {
+        Stocktake stocktake = findByNo(stocktakeNo);
+        requireTransition(stocktake, StocktakeStatus.REVIEWED);
+
+        if (requireSeparateConfirmer && reviewer.equals(stocktake.getSubmittedBy())) {
+            throw new BusinessException("复核人不能是提交人本人（当前配置要求职责分离）");
+        }
+
+        stocktake.setStatus(StocktakeStatus.REVIEWED);
+        stocktake.setReviewedBy(reviewer);
+        stocktake.setReviewedAt(LocalDateTime.now());
+        stocktake.setReviewComment(comment);
+        saveWithOptimisticCheck(stocktake);
+
+        log.info("复核盘点单 {}，复核人 {}", stocktakeNo, reviewer);
+        return stocktake;
+    }
+
+    /**
      * 确认：把差异写进台账。
      *
      * 逐条用 {@link ChemicalBatchRepository#adjustTo} 做条件更新，条件里带着建单时的账面量。
@@ -218,10 +274,21 @@ public class StocktakeService {
      * <b>为什么差异写 ADJUST 流水而不是直接改余额：</b>台账的语义是「只增不改」。
      * 盘亏 -20 mL 和「这条记录被改成 280」是两件不同的事：前者能追溯，后者抹掉了历史。
      * 而且写流水之后，对账接口能立刻把这个批次重新对平。
+     *
+     * <p>复核开关打开时只允许从 REVIEWED 确认；关闭时 SUBMITTED / REVIEWED 都可以。
+     * 开关只影响入口判断，调账逻辑本身不变。
      */
     @Transactional
     public Stocktake confirm(String stocktakeNo, String operator) {
         Stocktake stocktake = findByNo(stocktakeNo);
+
+        if (requireReview && stocktake.getStatus() != StocktakeStatus.REVIEWED) {
+            throw new BusinessException("当前配置要求先复核再确认，这张单的状态是 "
+                    + stocktake.getStatus() + "，请先复核");
+        }
+        if (requireSeparateConfirmer && operator.equals(stocktake.getSubmittedBy())) {
+            throw new BusinessException("确认人不能是提交人本人（当前配置要求职责分离）");
+        }
         requireTransition(stocktake, StocktakeStatus.CONFIRMED);
 
         List<StocktakeItem> items = itemRepository.findByStocktakeIdOrderByIdAsc(stocktake.getId());
@@ -345,12 +412,11 @@ public class StocktakeService {
     }
 
     /**
-     * 单号：规则同申请单，见 {@link DocumentNoGenerator}。
+     * 单号：规则同申请单，见 {@link DocumentNoService}。
      *
-     * 不用「当天流水号 +1」，是因为那要查一次当天最大值，又是一处并发点。
-     * 唯一性最终由唯一索引兜底，{@link #create} 会把冲突翻译成 409 而不是 500。
+     * 号段从数据库分配，进程内自增；{@link #create} 在撞号时丢弃本地段并重试一次。
      */
     private String nextStocktakeNo() {
-        return DocumentNoGenerator.next("ST");
+        return documentNoService.next("ST");
     }
 }

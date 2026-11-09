@@ -21,7 +21,6 @@ import org.springframework.retry.interceptor.RetryOperationsInterceptor;
 import org.springframework.retry.policy.SimpleRetryPolicy;
 import org.springframework.retry.support.RetryTemplate;
 import org.springframework.amqp.rabbit.config.SimpleRabbitListenerContainerFactory;
-import org.springframework.scheduling.annotation.EnableScheduling;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -34,7 +33,6 @@ import java.util.Map;
  * 没有监听器就不会去连 broker——默认套件和裸 H2 启动不需要 RabbitMQ。
  */
 @Configuration
-@EnableScheduling
 @ConditionalOnProperty(prefix = "hazmat.mq", name = "enabled", havingValue = "true")
 public class RabbitEncodeConfig {
 

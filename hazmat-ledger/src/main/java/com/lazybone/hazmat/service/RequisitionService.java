@@ -1,7 +1,6 @@
 package com.lazybone.hazmat.service;
 
 import com.lazybone.hazmat.common.BusinessException;
-import com.lazybone.hazmat.common.DocumentNoGenerator;
 import com.lazybone.hazmat.common.ResourceNotFoundException;
 import com.lazybone.hazmat.dto.RequisitionRequest;
 import com.lazybone.hazmat.dto.ReviewRequest;
@@ -71,24 +70,30 @@ public class RequisitionService {
     private final ChemicalRepository chemicalRepository;
     private final StockService stockService;
     private final MeterRegistry meterRegistry;
+    private final DocumentNoService documentNoService;
 
     /**
      * 审批的事务边界由模板显式控制，不再用 {@code @Transactional}。原因见 {@link #review}：
      * 版本冲突要换一个新事务重来，而同一个事务里抛过乐观锁异常之后持久化上下文已经不可用。
      */
     private final TransactionTemplate reviewTx;
+    /** 建单也要在单号冲突时换新事务重试，见 {@link #submit} */
+    private final TransactionTemplate submitTx;
 
     public RequisitionService(RequisitionRepository requisitionRepository,
                               RequisitionLogRepository logRepository,
                               ChemicalRepository chemicalRepository,
                               StockService stockService,
+                              DocumentNoService documentNoService,
                               PlatformTransactionManager transactionManager,
                               MeterRegistry meterRegistry) {
         this.requisitionRepository = requisitionRepository;
         this.logRepository = logRepository;
         this.chemicalRepository = chemicalRepository;
         this.stockService = stockService;
+        this.documentNoService = documentNoService;
         this.reviewTx = new TransactionTemplate(transactionManager);
+        this.submitTx = new TransactionTemplate(transactionManager);
         this.meterRegistry = meterRegistry;
     }
 
@@ -101,26 +106,34 @@ public class RequisitionService {
      * Service 保留参数而不是直接读 SecurityContext，是为了让它能在后台任务、
      * 并发测试里被直接调用，不依赖线程上的认证上下文。
      */
-    @Transactional
     public Requisition submit(String applicant, RequisitionRequest request) {
+        try {
+            return submitTx.execute(status -> submitOnce(applicant, request));
+        } catch (DataIntegrityViolationException e) {
+            // 号段缓存可能已经落后于数据库（库被恢复、有人手工插过单号）。
+            // 丢弃本地段后换一个新事务重试一次，不要直接让用户重提。
+            log.info("申请单号撞唯一索引，丢弃本地号段后重试");
+            documentNoService.invalidate("REQ");
+            try {
+                return submitTx.execute(status -> submitOnce(applicant, request));
+            } catch (DataIntegrityViolationException retry) {
+                throw new BusinessException("申请单号生成冲突，请重新提交");
+            }
+        }
+    }
+
+    private Requisition submitOnce(String applicant, RequisitionRequest request) {
         if (!chemicalRepository.existsById(request.chemicalId())) {
             throw new ResourceNotFoundException("试剂不存在: id=" + request.chemicalId());
         }
-        Requisition r;
-        try {
-            r = requisitionRepository.saveAndFlush(Requisition.builder()
-                    .reqNo(nextReqNo())
-                    .applicant(applicant)
-                    .chemicalId(request.chemicalId())
-                    .quantity(request.quantity())
-                    .purpose(request.purpose())
-                    .status(RequisitionStatus.PENDING)
-                    .build());
-        } catch (DataIntegrityViolationException e) {
-            // 单号是 32 位随机序号，多实例部署时仍可能撞上唯一索引。
-            // 参数本身没错，是生成空间冲突——给 400 业务提示让前端重提，不要变成 500
-            throw new BusinessException("申请单号生成冲突，请重新提交");
-        }
+        Requisition r = requisitionRepository.saveAndFlush(Requisition.builder()
+                .reqNo(nextReqNo())
+                .applicant(applicant)
+                .chemicalId(request.chemicalId())
+                .quantity(request.quantity())
+                .purpose(request.purpose())
+                .status(RequisitionStatus.PENDING)
+                .build());
 
         // 创建也记一条，时间线才是完整的。fromStatus 留空，见实体上的说明
         record(r.getId(), null, RequisitionStatus.PENDING, applicant, "提交领用申请");
@@ -388,14 +401,13 @@ public class RequisitionService {
     }
 
     /**
-     * 申请单号：见 {@link DocumentNoGenerator}。
+     * 申请单号：见 {@link DocumentNoService}。
      *
-     * 这里**故意不用「当天流水号自增」**，因为那需要一次「查今天最大号 + 1」，
-     * 又是一处并发点，得再加锁或重试。单号只用于人眼识别和口头沟通，
-     * 不需要连续。但要说明白：唯一性最终仍由数据库唯一索引兜底，
-     * 所以 {@link #submit} 会把唯一约束冲突翻译成 409 而不是放任它变成 500。
+     * 号段从数据库分配，进程内自增；段用完再申请下一段。单号只用于人眼识别和
+     * 口头沟通，不要求连续。唯一性由号段和单号唯一索引共同保证，
+     * {@link #submit} 在撞号时会丢弃本地段并重试一次。
      */
     private String nextReqNo() {
-        return DocumentNoGenerator.next("REQ");
+        return documentNoService.next("REQ");
     }
 }
