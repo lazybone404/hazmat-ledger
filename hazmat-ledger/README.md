@@ -46,11 +46,21 @@
 ```bash
 export JAVA_HOME="/c/Program Files/Java/jdk-21.0.11"   # 见下方「环境要求」
 ./mvnw spring-boot:run        # 端口 8090，启动后自动灌 18 条试剂档案、21 个批次
-./mvnw test                   # 251 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
+./mvnw test                   # 268 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
                               # MySQL 实机与 RabbitMQ 链路是 *IT（4 + 1 个），不参与默认执行，见下文
 ```
 
 演示用的固定日期数据里特意留了**已过期**和**临期**两类批次，所以启动后直接就能看到预警。
+
+浏览器打开 `http://localhost:8090/` 是随 jar 一起发布的演示前端：登录页、试剂档案与库存台账、
+效期预警、领用审批、盘点、报废、MSDS 检索、运维告警和用户管理都在里面，按角色显示菜单。
+前端是 `index.html` + `app.js` + `styles.css` 三个静态文件，Vue 3.5.45 放在
+`src/main/resources/static/vendor/`，不依赖 CDN，也不需要 Node/Vite 构建。页面本身匿名可打开，
+但它调用的 `/api/**` 仍然逐个要求 Bearer token。
+
+`index.html` 响应 `Cache-Control: no-cache`，`app.js` / `styles.css` 引用时带 `?v=1`：
+改前端后不用清浏览器缓存，也不会出现「页面是新的、脚本还是旧的」。
+见 §4.10。
 
 ### 登录（所有业务接口都要 Bearer token）
 
@@ -243,6 +253,8 @@ docker compose start rabbitmq                       # relay 默认 30 秒内补�
 | GET | `/api/msds/encode-tasks?limit=20` | ADMIN | 最近编码任务：状态、尝试次数、最后错误与时间戳；MQ 关闭时不产生新任务，列表通常为空 |
 | POST | `/api/msds/reconcile` | ADMIN | 向量库对账：把「MySQL 已编码、向量库缺失」的行补写回去；幂等，memory 模式直接返回说明 |
 | POST | `/api/msds/rollback` | ADMIN | 回滚到上一版索引：只交换 active/previous 指针，不动块；没有上一版时返回业务错误 |
+| GET | `/api/ops/alerts?status=OPEN&type=&page=&size=` | ADMIN | 运维告警分页，按 `lastSeenAt` 倒序。`status` 取 `OPEN`/`RESOLVED`，`type` 精确匹配。同一类故障按 `fingerprint` 合并成一行并累加 `occurrences`，不会每次扫描新增一条 |
+| POST | `/api/ops/alerts/{id}/resolve` | ADMIN | 解决一条未解决告警，记录解决人与时间。已解决的告警再次发生时会被重新打开，`occurrences` 继续累加 |
 | GET | `/api/reports/stock-summary?withinDays=` | 登录 | 库存汇总（MyBatis-Plus）：按分类 + 单位给出试剂数、批次数、总量、临期量与过期量 |
 | GET | `/api/reports/flow-trend?days=` | 登录 | 出入库趋势（MyBatis-Plus）：按自然日 + 变更类型汇总，数量带符号 |
 | GET | `/actuator/health` | 公开 | 探活，返回 `{"status":"UP"}`；`/actuator/health/liveness`、`/actuator/health/readiness` 同样公开 |
@@ -324,6 +336,18 @@ DRAFT ──提交（要求全部实盘量已录）──> SUBMITTED ──复�
 复核档 `REVIEWED` 是可选的：`hazmat.stocktake.require-review=false` 时 `SUBMITTED` 可以直接确认，
 `review` 接口只做留痕；打开后必须先复核。`hazmat.stocktake.require-separate-confirmer=true`
 时复核人和确认人都不能是提交人，单管理员部署会走不完整流程——默认关闭就是这个原因。
+
+报废单的状态机（`ScrapOrderStatus.canTransitionTo`）：
+
+```
+PENDING ──审批通过──> APPROVED
+   ├──审批驳回──> REJECTED
+   └──本人撤销──> CANCELLED
+```
+
+`APPROVED` 时同事务扣减库存并写 `SCRAP_ORDER` 流水；驳回与撤销不动库存。
+审批时若可用量已变化、扣减失败，单据自动置 `REJECTED` 并写明原因，不会停在 `PENDING`。
+后三个都是终态，防止重复审批或撤销后继续扣减。
 
 ---
 
@@ -592,10 +616,51 @@ UPDATE chemical_batch SET available_quantity = available_quantity - :qty
   **部分出库**，超量申请会成功发出剩余量。改用「报废量大于批次余量」触发条件扣减失败，
   才真的走到事务回滚，p99 12 ms、零 5xx。
 
-压测还顺带查出两个真实缺陷，都已修：4 位随机单号在并发下撞唯一索引变成 500（改为进程内
-自增 + 冲突翻译成 400 业务错误，见 §4.3）；数量超过 `DECIMAL(12,3)` 上限时数据库截断报错变成 500
+压测还顺带查出两个真实缺陷，都已修：4 位随机单号在并发下撞唯一索引变成 500（起初改成
+进程内自增，M1 又换成数据库号段，见 §4.3）；数量超过 `DECIMAL(12,3)` 上限时数据库截断报错变成 500
 （四个数量入口补 `@DecimalMax`，返回 400）。数字与局限见
 [docs/实验记录.md](docs/实验记录.md) §1.9。
+
+### 4.10 （支撑，M2）巡检写成告警，而不是只打日志
+
+效期、对账、盘点超时这三件事以前要么在查询时现算，要么得有人手动调接口。M2 把它们放进
+`StockOpsJob`，按 cron 扫描；发现的问题不写日志了事，而是落到 `ops_alert` 表，由 ADMIN
+通过 `/api/ops/alerts` 查看和标记解决。
+
+告警表的关键设计是 `fingerprint` 唯一 + `occurrences` 累加：
+
+- 同一类故障（如 `EXPIRY:2026-11-10`、`RECONCILE:42`）只占一行，重复扫描只把次数加一，
+  不会每次扫描堆一条新记录。
+- `raise` 的 UPDATE **不限制 `resolved_at`**：已解决的告警再次发生时会重新打开，
+  而不是因为唯一索引插不进去、或者永远看不到新故障。
+- 两个实例同时报同一故障时，UPDATE 影响 0 行、INSERT 撞唯一索引，第二个实例在新事务里
+  重试一次 UPDATE 即可合并。所以 UPDATE 与 INSERT 各自用 `REQUIRES_NEW`，
+  避免唯一冲突把调用方事务标记成 rollback-only。
+
+盘点提醒按当前状态分两个指纹：`STOCKTAKE_REVIEW_STALE:{单号}` 是「已提交待复核」，
+`STOCKTAKE_CONFIRM_STALE:{单号}` 是「已复核待确认」。只查 `SUBMITTED` 会漏掉卡在复核后的单子。
+
+索引刷新是多实例下的另一半：`MsdsIndexService.rebuild()` 先拿 JVM 本地锁，再在事务里
+`SELECT ... FOR UPDATE` 锁 `msds_index_lock` 的固定行，保证同一时刻只有一个实例在重建；
+锁随事务提交或回滚释放，实例崩溃时连接断开、数据库自动释放。其它实例不参与重建，
+由 `MsdsIndexRefreshJob` 每 30 秒比对一次 active 版本，变了才重建内存字面索引，
+所以最坏延迟 30 秒。相关配置：
+
+```properties
+hazmat.jobs.enabled=true                  # 总开关，关掉后所有 @Scheduled Bean 都不装配
+hazmat.ops.expiry-cron=0 0 8 * * *        # 效期扫描
+hazmat.ops.reconcile-cron=0 30 2 * * *    # 对账巡检
+hazmat.ops.stocktake-reminder-cron=0 0 9 * * *
+hazmat.ops.expiry-days=30                 # 预警窗口
+hazmat.ops.stocktake-stale-hours=24       # 超过多久算卡住
+hazmat.ops.encode-task-retention-days=7   # 编码任务终态保留期
+hazmat.ops.reconcile-max-chemicals=100    # 每轮最多对账的试剂数
+hazmat.msds.index-refresh-ms=30000        # 其它实例的索引刷新间隔
+```
+
+演示前端也是这一轮加的，但它没有引入 Node 构建链：三个静态文件 + 一份本地 Vue 运行时
+直接打进 jar。`index.html` 返回 `Cache-Control: no-cache`，`app.js`/`styles.css` 带
+`?v=1`，改前端不用清缓存。页面匿名可打开，`/api/**` 仍全部要求 Bearer token。
 
 ---
 
@@ -610,14 +675,19 @@ src/main/java/com/lazybone/hazmat/
 │                    ChemicalIncompatibility 禁忌混放关系（CAS 对 + 原因 + 出处）
 │                    MsdsEncodeTask 编码任务（状态机 + claim 租约）
 │                    ScrapOrder 报废申请 / ScrapOrderStatus 报废状态机
-│                    DocumentNoSegment 业务单号号段
-├── repository/      15 个；扣减、盘点调账、开封 CAS 与状态 CAS 的关键 SQL 都在 ChemicalBatchRepository
+│                    DocumentNoSegment 业务单号号段 / MsdsIndexLock 索引重建行锁
+│                    OpsAlert 运维告警（指纹去重 + 重新打开）
+├── repository/      17 个；扣减、盘点调账、开封 CAS 与状态 CAS 的关键 SQL 都在 ChemicalBatchRepository
 ├── service/         StockService 入库出库与对账（核心） / RequisitionService 流程（核心）
 │                    StocktakeService 盘点建单与调账（核心） / ChemicalService
 │                    ScrapOrderService 报废申请、审批与自动驳回
 │                    DocumentNoService 数据库号段 + 进程内块缓存
 │                    ChemicalSafetyService 台账与知识库的连接点（试剂 id → CAS → 检索 / 安全摘要）
 │                    IncompatibilityService 在库试剂两两比对、冲突与未覆盖分开返回
+├── ops/             StockOpsJob 效期扫描、对账巡检、盘点超时提醒（写告警）
+│                    EncodeTaskRetentionJob 编码任务终态清理
+│                    MsdsIndexRefreshJob 每 30 秒检查 active 版本并刷新内存索引
+│                    AlertService 按 fingerprint 合并告警；OpsProperties 各任务开关与 cron
 ├── msds/            MsdsChunker 按章节切块 / MsdsIndexService 增量落库
 │                    MsdsLiteralIndex 内存倒排 / MsdsQueryExpander 同义词
 │                    MsdsVectorIndex 内存向量快照 / MsdsSearchService RRF 融合
@@ -629,6 +699,7 @@ src/main/java/com/lazybone/hazmat/
 ├── controller/      AuthController 登录与自助注册 / ChemicalController / RequisitionController
 │                    StocktakeController 盘点流程 / ScrapController 报废审批
 │                    MsdsController / IncompatibilityController 全实验室混放检查
+│                    OpsAlertController 运维告警查询与解决 / FrontendController 演示前端入口
 ├── report/          只读报表（MyBatis-Plus）：ReportMapper + XML，库存汇总与出入库趋势
 ├── security/        SecurityConfig JWT 过滤链与角色 / JwtService 签发
 │                    LoginAttemptGuard 登录失败计数与短时锁定
@@ -652,6 +723,9 @@ src/main/resources/db/migration/   V1 表结构、V2 分页复合索引、V3 盘
                                    Hibernate 只做 validate，不自动建表
 src/main/resources/mapper/         报表 XML（ReportMapper.xml），只有只读 SELECT
 src/main/resources/msds/           18 份按 GB/T 16483 的 16 节结构整理的演示文本（{casNo}.md）
+src/main/resources/static/         演示前端：index.html / app.js / styles.css / favicon.svg
+                                   vendor/vue.global.prod.js —— Vue 3.5.45 本地运行时，
+                                   同目录 README.md 记版本、来源、SHA-256 与校验命令
 src/test/java/com/lazybone/hazmat/
 ├── StockConcurrencyTest    30 线程争同一批次，断言「不超发」且「恰好发完」；并发同批次号入库只落一条
 ├── RequisitionFlowTest     状态机、乐观锁、先到期先出、台账一致性、申请人不能自批
@@ -668,6 +742,12 @@ src/test/java/com/lazybone/hazmat/
 ├── ScrapOrderTest          报废审批：状态机、自批拒绝、扣一次、驳回不扣、并发只成功一次、余量变化自动驳回
 ├── ChemicalSafetyTest      详情接口、安全入口、领用安全摘要、无 MSDS 的 available=false、跨用户 403、401/404/400
 ├── RegistrationIntegrationTest  自助注册：待启用账号、管理员启用后可登录、重复用户名不暴露存在性
+├── OpsJobsTest             巡检任务：告警指纹去重、解决后重新打开、效期汇总结算、盘点待复核/待确认分开提醒、对账告警
+├── EncodeTaskRetentionTest 只删 DONE/DEAD 且早于保留期的任务，RUNNING 不动
+├── EncodeTaskMessageRecovererTest  重试耗尽标 DEAD 后仍抛拒绝异常；无 taskId 只进 DLQ 不碰库
+├── MsdsIndexLockTest       两个实例并发重建串行完成，不产生重复块
+├── MsdsIndexLockConflictTest  抢锁超过等待上限时翻译成可重试的业务冲突
+├── TokenVersionServiceTest token 版本缓存：TTL 为 0 每次回源、TTL 内命中、evict 后回源、null 也缓存
 ├── IncompatibilityTest     同柜/分柜/未覆盖三分类、多柜位求交集、无规则显式未覆盖、依据三态与覆盖率、401/404
 ├── entity/ChemicalIncompatibilityTest  规则对归一化、拒绝自对与空值
 ├── seed/IncompatibilitySeedDataTest    种子 CAS 拼写、重复对、出处完整性、依据字段
@@ -720,8 +800,12 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
 - 开封管理：开封不可撤销（点错了只能报废或另开一批）；`postOpenDays` 事后修改不回溯已开封批次，
   可用期在开封那一刻就已落库；开封是「整瓶一次性开启」的粗粒度模型，没有「分次取用、剩余多少天」
   的连续跟踪，也不支持一瓶同时用于多个实验的用量分摊。
-- 对账是**手动调用的查询接口**，没有定时巡检与告警：账不平不会主动通知，得有人去看。
-  真实系统应该定时跑全量对账并在 `consistent=false` 时报警。
+- 对账在 M2 补了定时巡检（`StockOpsJob.reconcileAll`），不平的试剂写成 `CRITICAL` 告警，
+  但**告警只在应用内可见**：没有邮件、短信或 webhook 推送，得有人打开 `/api/ops/alerts`
+  或运维页才看得到。多实例部署时每个实例都会各跑一遍任务，靠 `fingerprint` 去重，
+  没有 leader election，同一故障会重复计算、只合并记录。
+  每轮最多检查 `hazmat.ops.reconcile-max-chemicals` 个试剂，全库量大时要调大或分批。
+  效期扫描同理：定时任务写一条按日期聚合的告警，但真正的「通知到人」仍未做。
 - 禁忌混放的关系表目前只有 51 对，全部来自仓库内 18 份 MSDS 第 10 节，**没有按 GB 15603
   建完整关系**；换一批试剂需要重新导入。`uncovered` 是「没有依据」而不是「安全」，
   不能把接口返回的空冲突列表当成全库安全结论。混放检查已按批次 `location` 判断同柜，
@@ -749,7 +833,18 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
   这个窗口内新内容只能靠字面路召回。E8 实测（本机 H2，302 块）：3 次重建各 228~351 ms，
   4 线程并发查询 6098 次，异常 0、空结果 0；这是 H2 单机的小规模数字，不代表 MySQL 或 10 万块。
   `memory` 与 `pgvector` 两种存储都只读 active 版本，回滚后即时生效。
-- 没有定时任务：效期预警是查询时算的，真实系统应该有定时扫描 + 通知；盘点提醒同样没有。
+- 定时任务由 `hazmat.jobs.enabled` 总开关控制，默认开启；`hazmat.ops.*` 下各 cron、
+  保留天数、每轮对账上限都可单独覆盖。
+  任务本身没有分布式调度：多实例会各跑一遍，靠告警指纹去重，不做「只让一个实例执行」。
+  实例在任务执行中崩溃，本轮扫描就直接丢失，下一轮重新扫描，不做补偿或断点续跑。
+  盘点超时提醒只写告警，不会自动催办或改单据状态。
+- `MsdsIndexRefreshJob` 每 30 秒检查一次 active 版本，其它实例最多延迟 30 秒看到新索引；
+  重建实例自身立即生效。索引重建用数据库行锁串行化，但不带 fencing token，
+  只保证同一时刻只有一个事务在写，不做跨实例的精确一次调度。锁等待超时翻译成业务错误，
+  不无限等待；实例崩溃时锁随连接断开自动释放。
+- 编码任务清理（`EncodeTaskRetentionJob`）只删除 `DONE`/`DEAD` 且 `finished_at` 早于保留期的任务，
+  默认保留 7 天；`RUNNING` 中的任务不会被删，但清理任务也没有处理租约已过期却停在 `RUNNING`
+  的僵尸任务，那部分仍靠 claim 时的接管逻辑。
 - 写路径压测只在本机 MySQL 容器上跑了 10 秒单场景（§4.9），没有长稳、没有网络延迟、
   没有多实例竞争；数字用于比较链路之间的量级，不能直接当生产容量。已知两个规模边界：
   出库按效期扫描该试剂**全部**可用批次，批次数从个位数涨到约 5000 时会翻倍（p50 183→362 ms）；
@@ -802,6 +897,11 @@ MSDS 检索的切块规则、检索打分与后续阶段见 [docs/msds-rag-设�
   **瓶颈是召回不是延迟**；索引约 8 KB/块（10 万块 781 MB，且 m=8/16/32 实测同体积，
   体积由 1024 维向量副本主导）。当前 288 块继续用全表扫描，阶段 2 上量后必须用真实
   bge-m3 向量重测再定参数。数字与命令见 [docs/实验记录.md](docs/实验记录.md) §1.7。
+- 演示前端是随 jar 发布的单页静态文件（`index.html` + `app.js` + `styles.css`），
+  token 存在 `sessionStorage`，没有路由库、组件库和构建链，也没有打包压缩。
+  它和 API 同源部署，不是独立前端工程，不支持跨域部署；页面匿名可打开，
+  但权限全部由后端按 token 判定，前端隐藏按钮只是体验，拦截靠接口。
+  前端没有自动化 UI 测试，只有模板编译检查与手工/脚本走查；用于演示和验收，不作为生产前端。
 - MSDS 文本由 PubChem 公开安全数据整理，仅用于演示，不构成实际安全操作依据；
   真实系统要接供应商提供的正式 SDS。默认不调用云端模型，开启后正文会发送到第三方服务。
 - `/api/msds/reindex` 与 `/api/msds/status` 现在限 ADMIN。它们仍建议放在网关或内网之后：
