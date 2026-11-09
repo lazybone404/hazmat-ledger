@@ -39,6 +39,9 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.hamcrest.Matchers.containsString;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -448,5 +451,30 @@ class SecurityIntegrationTest {
                         .header("Authorization", alice))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.consistent").value(true));
+    }
+
+    @Test
+    @DisplayName("演示前端静态资源匿名可打开，业务接口仍然 401")
+    void staticFrontendIsPublicButApiIsNot() throws Exception {
+        // 首页显式 no-cache：演示时浏览器不能拿旧页面配新接口
+        mockMvc.perform(get("/"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Cache-Control", containsString("no-cache")))
+                .andExpect(content().string(containsString("危化品台账")));
+
+        mockMvc.perform(get("/index.html"))
+                .andExpect(status().isOk())
+                .andExpect(content().contentTypeCompatibleWith(MediaType.TEXT_HTML));
+
+        mockMvc.perform(get("/app.js"))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/styles.css"))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/vendor/vue.global.prod.js"))
+                .andExpect(status().isOk());
+
+        // 放行的只是页面，业务接口不跟着裸奔
+        mockMvc.perform(get("/api/chemicals"))
+                .andExpect(status().isUnauthorized());
     }
 }

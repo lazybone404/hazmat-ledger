@@ -76,6 +76,11 @@ public class SecurityConfig {
                         // 接口文档与 Swagger UI。可用 SPRINGDOC_ENABLED=false 整体关闭；
                         // 开放时它会把全部路由暴露出来，生产环境应由网关限制在内网
                         .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
+                        // 演示前端是三个静态文件加本地 Vue 运行时，页面本身不含业务数据；
+                        // 页面能公开打开，但页面里调用的 /api/** 仍然逐个要求 Bearer token。
+                        // 不放开这些路径的话，浏览器打开首页会先撞上 401，连登录框都加载不出来。
+                        .requestMatchers("/", "/index.html", "/app.js", "/styles.css",
+                                "/vendor/**", "/favicon.ico", "/favicon.svg").permitAll()
                         .requestMatchers(org.springframework.http.HttpMethod.OPTIONS, "/**").permitAll()
                         // 默认拒绝：新接口忘了配权限时至少要求登录
                         .anyRequest().authenticated())

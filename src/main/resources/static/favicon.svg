@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="危化品台账">
+    <rect width="64" height="64" rx="14" fill="#1f3a4d"/>
+    <path d="M32 10 L51 18 V32 C51 43 43 51 32 55 C21 51 13 43 13 32 V18 Z" fill="#d97706"/>
+    <path d="M32 21 V36" stroke="#ffffff" stroke-width="5" stroke-linecap="round"/>
+    <circle cx="32" cy="45" r="3" fill="#ffffff"/>
+</svg>
