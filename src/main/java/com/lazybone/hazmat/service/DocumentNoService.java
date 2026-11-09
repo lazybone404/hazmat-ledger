@@ -1,5 +1,6 @@
 package com.lazybone.hazmat.service;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -17,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>号段允许跳号：分配后业务事务回滚、或进程重启丢弃当前段，都会留下空号。
  * 单号只要求唯一、可读，不要求连续。
  */
+@Slf4j
 @Service
 public class DocumentNoService {
 
@@ -51,6 +53,7 @@ public class DocumentNoService {
             long start = allocator.allocate(prefix, blockSize);
             Block fresh = new Block(new AtomicLong(start), start + blockSize);
             if (blocks.putIfAbsent(prefix, fresh) == null) {
+                log.debug("启用新号段 {} [{}, {})", prefix, start, fresh.end);
                 return format(prefix, fresh.next.getAndIncrement());
             }
             // 另一个线程抢先装了新段。刚申请的段作废，跳过的号可接受
