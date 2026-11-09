@@ -236,6 +236,8 @@
 						<hazmat.ai.encode-on-startup>false</hazmat.ai.encode-on-startup>
 						<!-- 默认套件不依赖 RabbitMQ：MQ 路径由独立 *IT 用 Testcontainers 验证 -->
 						<hazmat.mq.enabled>false</hazmat.mq.enabled>
+						<!-- 默认套件不跑定时任务：后台线程会和断言抢执行 -->
+						<hazmat.jobs.enabled>false</hazmat.jobs.enabled>
 						<!--
 							默认不连 Redis：全部测试套件不该因为本机有没有 Redis 而红绿不同。
 							缓存逻辑由 ChemicalCacheTest 直接对 ChemicalCache 做单测（mock 掉

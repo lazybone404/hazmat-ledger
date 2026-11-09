@@ -112,6 +112,10 @@ services:
       # 必填：缺失时 compose 直接报错并指名字段，而不是起一个没有签名的应用
       HAZMAT_JWT_SECRET: ${HAZMAT_JWT_SECRET:?请先 cp .env.example .env 并设置 HAZMAT_JWT_SECRET}
       HAZMAT_SEED_PASSWORD: ${HAZMAT_SEED_PASSWORD:-ChangeMe123!}
+      HAZMAT_TOKEN_CACHE_TTL: ${HAZMAT_TOKEN_CACHE_TTL:-30s}
+      HAZMAT_REGISTRATION_ENABLED: ${HAZMAT_REGISTRATION_ENABLED:-false}
+      HAZMAT_STOCKTAKE_REQUIRE_REVIEW: ${HAZMAT_STOCKTAKE_REQUIRE_REVIEW:-false}
+      HAZMAT_STOCKTAKE_SEPARATE_CONFIRMER: ${HAZMAT_STOCKTAKE_SEPARATE_CONFIRMER:-false}
       HAZMAT_VECTOR_STORE: ${HAZMAT_VECTOR_STORE:-memory}
       # 启用 pgvector profile 时容器内按服务名连；store=memory 时这些值不会被读取
       HAZMAT_PG_URL: ${HAZMAT_PG_URL:-jdbc:postgresql://pgvector:5432/${PG_VECTOR_DB:-hazmat_vectors}}
