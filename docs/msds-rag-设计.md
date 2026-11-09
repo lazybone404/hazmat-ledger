@@ -324,7 +324,8 @@ reindex / 启动补编码
 - broker 不可用时应用照常启动，任务留 `PENDING`，检索继续用旧向量；
   `/actuator/health` 不因 RabbitMQ DOWN 而失败（`management.health.rabbit.enabled=false`），
   任务积压看 `msds_encode_task_pending` 与 `/api/msds/encode-tasks`。
-- 多实例同时 `reindex` 仍受 JVM 内 `rebuildLock` 限制；本次只解决编码任务重复执行。
+- 多实例同时 `reindex` 由数据库行锁串行化（见 §4.9）；JVM 内 `rebuildLock` 只防同一实例内的并发。
+- 任务表会累积终态的 `DONE`/`DEAD` 行，由 `EncodeTaskRetentionJob` 按保留期清理（默认 7 天）。
 
 **配置**
 
@@ -343,6 +344,51 @@ hazmat.mq.encode.relay-min-age-ms=10000
 
 `hazmat.mq.enabled=false` 时只装配 `LocalEncodeTaskDispatcher`，行为与之前完全一致：
 `reindex` 仍委托本地 executor，`/encode-tasks` 返回空列表，`encodeTaskId` 为 null。
+
+### 4.9 多实例重建与索引刷新
+
+单实例时 `rebuildLock`（`ReentrantLock`）足够；多实例部署后，两个进程各自持本地锁，
+仍可能同时进入「写新版本块 → 切 active 指针」。处理分两层：
+
+**重建串行化：数据库行锁**
+
+`msds_index_lock(id INT PRIMARY KEY, owner, acquired_at)` 预置 `id=1` 一行。
+`rebuild()` / `rollback()` 的顺序是：
+
+1. 拿 JVM 内 `rebuildLock`（同一实例的第二个请求直接排队，不去占数据库连接）；
+2. 在 `transactionTemplate` 内 `SELECT ... FOR UPDATE` 锁 `id=1`；
+3. 锁内执行 `doRebuild()` / `doRollback()`，事务提交或回滚时释放行锁。
+
+锁等待超时（`CannotAcquireLockException` / `PessimisticLockException` / `QueryTimeoutException`）
+翻译成业务错误「另一个实例正在重建索引，请稍后重试」，而不是让请求挂到数据库默认超时。
+实例崩溃时连接断开，数据库自动释放锁，不依赖应用侧的心跳或租约。
+
+这是**行锁，不是分布式锁服务**：只保证同一时刻只有一个重建事务，不提供 fencing token，
+也不做「精确一次」调度。`owner` / `acquired_at` 只用于排障，不参与判断。
+
+**其它实例刷新：版本比对**
+
+重建完成后，只有执行重建的实例立即换内存索引；其它实例手里的字面索引仍是旧版本。
+`MsdsIndexService` 记录 `volatile literalIndexVersion`，`refreshFromDatabase()` 结束时写入
+当前 active 版本。`MsdsIndexRefreshJob` 每 30 秒调用一次 `refreshIfVersionChanged()`：
+active 与 `literalIndexVersion` 不同才重建内存索引，相同则什么都不做。
+
+```
+实例 A reindex → active_version = v42
+实例 B 每 30s：active(v42) != literalIndexVersion(v41) → 重建字面索引 → 记 v42
+```
+
+因此**其它实例最坏延迟 30 秒**看到新索引；这段时间它们仍按旧 active 版本检索，
+不会读到半套块，只是新内容暂时搜不到。`memory` 与 `pgvector` 两种存储都走
+`activeChunks()`，刷新逻辑一致。
+
+**边界**
+
+- 刷新是「全量重建内存索引」，不是增量；当前 302 块可接受，块数上万时要改成增量或分片。
+- 30 秒是固定间隔，可用 `hazmat.msds.index-refresh-ms` 调整；间隔越短，数据库轮询越频繁。
+- 任务由 `hazmat.jobs.enabled` 总开关控制；关闭后其它实例不会自动刷新，需要重启或手工触发。
+- 行锁不解决「两个实例同时收到 reindex 请求」的排队体验：后到的请求会收到 409/业务错误，
+  由调用方稍后重试，而不是自动排队等待。
 
 ## 5. 检索
 
