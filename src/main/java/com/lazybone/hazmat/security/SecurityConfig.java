@@ -60,7 +60,10 @@ public class SecurityConfig {
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .headers(h -> h.frameOptions(f -> f.sameOrigin()))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/api/auth/login", "/h2-console/**", "/error").permitAll()
+                        // 注册接口本身公开，但是否开放由 AuthController 的配置开关决定；
+                        // 关闭时返回 403，而不是让请求卡在 401 上分不清「没开」与「没登录」
+                        .requestMatchers("/api/auth/login", "/api/auth/register",
+                                "/h2-console/**", "/error").permitAll()
                         // 探活与版本信息给容器编排和监控用，不需要凭证；
                         // 只放行 health/info，actuator 的其它端点也没有暴露。
                         // health 用 /** 而不是精确匹配：liveness/readiness 是子路径，

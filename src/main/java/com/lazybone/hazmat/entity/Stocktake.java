@@ -32,9 +32,10 @@ import java.time.LocalDateTime;
  * 后写的那个必须被拦下——否则差异会被调两次。这和领用申请的情况一样。
  * 对照库存扣减：那边不需要读，所以用条件更新。
  *
- * <b>为什么创建人和确认人分成两组字段：</b>盘点制度上要求「盘的人」和「核的人」分开。
- * 当前版本不强制两者不同（单管理员部署下强制不同会导致没人能确认），
- * 但字段留好了，将来要收紧只是加一条校验，不用改表。
+ * <b>为什么创建人、复核人、确认人分成三组字段：</b>盘点制度上要求「盘的人」
+ * 「复核的人」「确认的人」分开。默认只留痕、不强制——单管理员部署下强制分离
+ * 会导致没人能完成流程。需要收紧时用 {@code hazmat.stocktake.require-review}
+ * 与 {@code hazmat.stocktake.require-separate-confirmer} 打开，不用改表。
  */
 @Data
 @Builder
@@ -75,6 +76,21 @@ public class Stocktake {
     private String confirmedBy;
 
     private LocalDateTime confirmedAt;
+
+    /**
+     * 复核人、复核时间、复核意见。
+     *
+     * <p>三个字段都允许为空：复核是可选的（{@code hazmat.stocktake.require-review}），
+     * 历史盘点单也没有复核这一步。打开强制复核后，SUBMITTED 必须先经过这里才能确认。
+     */
+    @Column(name = "reviewed_by", length = 100)
+    private String reviewedBy;
+
+    @Column(name = "reviewed_at")
+    private LocalDateTime reviewedAt;
+
+    @Column(name = "review_comment", length = 500)
+    private String reviewComment;
 
     /** 乐观锁：状态流转必须比对这个版本号，理由见类注释 */
     @Version

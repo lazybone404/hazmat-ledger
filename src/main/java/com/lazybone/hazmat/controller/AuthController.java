@@ -2,17 +2,22 @@ package com.lazybone.hazmat.controller;
 
 import com.lazybone.hazmat.common.ApiResponse;
 import com.lazybone.hazmat.common.BusinessException;
+import com.lazybone.hazmat.common.ForbiddenException;
 import com.lazybone.hazmat.common.UnauthorizedException;
 import com.lazybone.hazmat.dto.ChangePasswordRequest;
 import com.lazybone.hazmat.dto.LoginRequest;
 import com.lazybone.hazmat.dto.LoginResponse;
+import com.lazybone.hazmat.dto.RegisterRequest;
 import com.lazybone.hazmat.dto.UserView;
 import com.lazybone.hazmat.entity.AppUser;
+import com.lazybone.hazmat.entity.UserRole;
 import com.lazybone.hazmat.repository.AppUserRepository;
 import com.lazybone.hazmat.security.JwtService;
 import com.lazybone.hazmat.security.LoginAttemptGuard;
 import com.lazybone.hazmat.security.TokenVersionService;
 import jakarta.validation.Valid;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -23,10 +28,12 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 登录与当前用户。
+ * 登录、当前用户与自助注册。
  *
- * 没做注册接口：账号由管理员建档（或种子数据），实验室系统里自助注册没有业务意义，
- * 反而多一个需要防滥用的入口。
+ * <p>账号默认由管理员建档（或种子数据）。自助注册是**可选的**入口，
+ * 由 {@code hazmat.security.registration.enabled} 控制，默认关闭；
+ * 打开后注册出来的也只是待启用账号，仍需管理员在用户管理里启用。
+ * 这样既保留自助申请的便利，又不把「能登录」这件事交给匿名调用方。
  */
 @RestController
 @RequestMapping("/api/auth")
@@ -44,17 +51,53 @@ public class AuthController {
     private final JwtService jwtService;
     private final LoginAttemptGuard loginAttemptGuard;
     private final TokenVersionService tokenVersions;
+    private final boolean registrationEnabled;
 
     public AuthController(AppUserRepository userRepository,
                           PasswordEncoder passwordEncoder,
                           JwtService jwtService,
                           LoginAttemptGuard loginAttemptGuard,
-                          TokenVersionService tokenVersions) {
+                          TokenVersionService tokenVersions,
+                          @Value("${hazmat.security.registration.enabled:false}")
+                          boolean registrationEnabled) {
         this.userRepository = userRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
         this.loginAttemptGuard = loginAttemptGuard;
         this.tokenVersions = tokenVersions;
+        this.registrationEnabled = registrationEnabled;
+    }
+
+    /**
+     * 自助注册。默认关闭；打开后创建的是 {@code enabled=false} 的 USER 账号。
+     *
+     * <p><b>用户名已存在时也返回同样的成功。</b>这个接口是公开的，如果「已存在」
+     * 和「注册成功」返回不同结果，它就变成了一个批量探测账号是否存在的工具。
+     * 真正的注册人不会因为没收到区分信息而受损——管理员启用时会看到账号。
+     *
+     * <p>无论是否写入，都先跑一次 BCrypt：否则「响应快 = 用户名已存在」仍然可被观察。
+     */
+    @PostMapping("/register")
+    public ApiResponse<Void> register(@Valid @RequestBody RegisterRequest request) {
+        if (!registrationEnabled) {
+            throw new ForbiddenException("未开放自助注册，请联系管理员建档");
+        }
+        String hash = passwordEncoder.encode(request.password());
+        if (userRepository.findByUsername(request.username()).isEmpty()) {
+            try {
+                userRepository.save(AppUser.builder()
+                        .username(request.username())
+                        .displayName(request.displayName())
+                        .passwordHash(hash)
+                        .role(UserRole.USER)
+                        .enabled(false)
+                        .build());
+            } catch (DataIntegrityViolationException e) {
+                // 并发注册同一个用户名：另一个请求刚插进去。对外仍是成功，
+                // 账号是否存在不在这条接口的告知范围内。
+            }
+        }
+        return ApiResponse.ok(null);
     }
 
     @PostMapping("/login")

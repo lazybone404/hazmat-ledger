@@ -17,6 +17,9 @@ public record StocktakeResponse(
         LocalDateTime createdAt,
         String submittedBy,
         LocalDateTime submittedAt,
+        String reviewedBy,
+        LocalDateTime reviewedAt,
+        String reviewComment,
         String confirmedBy,
         LocalDateTime confirmedAt,
         /** 有差异的条数；尚未全部录入时为 null */
@@ -33,6 +36,7 @@ public record StocktakeResponse(
                 s.getStocktakeNo(), s.getStatus().name(), s.getRemark(),
                 s.getCreatedBy(), s.getCreatedAt(),
                 s.getSubmittedBy(), s.getSubmittedAt(),
+                s.getReviewedBy(), s.getReviewedAt(), s.getReviewComment(),
                 s.getConfirmedBy(), s.getConfirmedAt(),
                 diffCount, items);
     }

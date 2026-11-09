@@ -8,9 +8,9 @@ import java.util.Set;
  * 盘点单的状态机。
  *
  * <pre>
- *   DRAFT ──提交──> SUBMITTED ──确认并调账──> CONFIRMED
- *     │                 │
- *     └──撤销───────────┴──撤销──> CANCELLED
+ *   DRAFT ──提交──> SUBMITTED ──复核──> REVIEWED ──确认并调账──> CONFIRMED
+ *     │                 │                   │
+ *     └──撤销───────────┴───────────────────┴──撤销──> CANCELLED
  * </pre>
  *
  * 为什么要有 DRAFT 和 SUBMITTED 两段，而不是「一录完就调账」：
@@ -23,6 +23,10 @@ import java.util.Set;
  *       这条路。把「决定调账」单独做成一次显式动作，是这类数据的常规做法。</li>
  * </ol>
  *
+ * <p>{@code REVIEWED} 是可选的复核档：由 {@code hazmat.stocktake.require-review}
+ * 决定是否强制先复核再确认。默认关闭——单管理员部署时强制复核会让流程无人可走。
+ * 关闭时 SUBMITTED 和 REVIEWED 都能直接确认；打开时只允许从 REVIEWED 确认。
+ *
  * 终态 CONFIRMED / CANCELLED 不允许再流转：防止「已取消的盘点单又被确认」
  * 或者重复确认导致同一差异被调两次。
  */
@@ -30,8 +34,10 @@ public enum StocktakeStatus {
 
     /** 草稿：可以录入实盘量 */
     DRAFT,
-    /** 已提交：实盘量齐了，等确认。此时不能再改数，只能确认或撤销 */
+    /** 已提交：实盘量齐了，等复核或确认。此时不能再改数，只能往下走或撤销 */
     SUBMITTED,
+    /** 已复核：复核人看过差异，等确认调账 */
+    REVIEWED,
     /** 已确认：差异已经写进台账（终态） */
     CONFIRMED,
     /** 已撤销：没有调账（终态） */
@@ -39,7 +45,8 @@ public enum StocktakeStatus {
 
     private static final Map<StocktakeStatus, Set<StocktakeStatus>> ALLOWED = Map.of(
             DRAFT, EnumSet.of(SUBMITTED, CANCELLED),
-            SUBMITTED, EnumSet.of(CONFIRMED, CANCELLED),
+            SUBMITTED, EnumSet.of(REVIEWED, CONFIRMED, CANCELLED),
+            REVIEWED, EnumSet.of(CONFIRMED, CANCELLED),
             CONFIRMED, EnumSet.noneOf(StocktakeStatus.class),
             CANCELLED, EnumSet.noneOf(StocktakeStatus.class));
 
