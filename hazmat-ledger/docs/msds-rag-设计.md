@@ -475,12 +475,28 @@ query ──┬─→ 字面检索（内存倒排，字 + 双字） → top 50
 | GET | `/api/msds/status` | 2（已实现） | 索引状态：块数、已编码、待编码、已放弃、暂停原因、模型与维度、四元组是否一致、是否在编码 |
 | GET | `/api/msds/encode-tasks?limit=20` | 2（已实现） | 最近编码任务：`id` / `indexVersion` / `status` / `attempts` / `maxAttempts` / `lastError` / `createdAt` / `updatedAt` / `finishedAt`。MQ 关闭时不产生新任务，列表通常为空 |
 | GET | `/api/msds/ask?q=...&casNo=...&topK=5` | 4（已实现） | 检索 + 生成，返回 `MsdsAnswer`（回答、引用、降级/拒答状态）；模型只看到前 5 条 |
+| GET | `/api/requisitions/{reqNo}/safety` | M1（已实现） | 领用详情页的安全摘要：按试剂 CAS 固定取 MSDS 第 2/4/6/8 节，返回 `ChemicalSafetyOverview`。不做检索，权限与申请详情一致（本人 / APPROVER / ADMIN） |
 
 过滤参数用 `casNo` 而不是 `chemicalId`：MSDS 按 CAS 号组织，而 `chemical_id` 允许为空（档案可能晚于索引落库），用档案 ID 过滤会在“文件已索引、档案未灌”时直接查不到。CAS 号是两份数据的共同键。
 
 `casNo` 可选：指定时只检索该试剂，不指定时检索全部。指定时返回结果里仍带试剂名，因为同一问题可能命中多个相似试剂（甲醇/乙醇）。
 
 `docType` 同样可选，作用在字面路与向量路之前，而不是检索后截断：先过滤再排序，才能保证「只要国标」时拿到的确实是国标里的前 N 条，而不是混合结果里剩下的几条。`/api/chemicals/{id}/safety` 也接受同名参数，默认不过滤。
+
+### 7.1 领用安全摘要（`/api/requisitions/{reqNo}/safety`）
+
+领用人打开申请时最需要的是四件事：这东西有什么危害、溅到身上怎么处理、洒了怎么处理、要戴什么。
+这些内容的位置在 GB/T 16483 的 16 节结构里是固定的（第 2、4、6、8 节），**不需要相关性排序**，
+所以这个接口走固定节号查询，不经过字面/向量检索：
+
+- 先按 `chemical.cas_no` 判断有没有索引过；没有则 `available=false` + 明确提示，不返回空列表。
+- 有索引时按 `activeVersion()` 过滤，只取当前版本的块。重建期间旧块还在表里，
+  不按版本过滤会把两版正文拼在一起。
+- 同一节被切成多块时按 `partNo` 顺序合并，正文截断到 500 字；完整内容仍在 `/api/msds/search` 里。
+- 有索引但缺某几节时返回 `available=true` + `message` 列出缺失章节——「资料不完整」
+  与「没有资料」是两件事，不能都退化成空数组。
+- 权限与 `/api/requisitions/{reqNo}` 一致：本人或 APPROVER / ADMIN。安全摘要本身不是秘密，
+  但它挂在申请下面，复用同一套权限判断，不另开规则。
 
 `POST /api/msds/reindex` 在阶段 1 只做切块与字面索引，没有模型调用成本；阶段 2 加入向量回填后，这一步会触发 embedding 调用，接口文档与状态提示已写明。
 
