@@ -1,10 +1,12 @@
 package com.lazybone.hazmat.msds;
 
 import com.lazybone.hazmat.common.BusinessException;
+import com.lazybone.hazmat.common.ConflictException;
 import com.lazybone.hazmat.entity.Chemical;
 import com.lazybone.hazmat.entity.KnowledgeDocType;
 import com.lazybone.hazmat.entity.KnowledgeDocument;
 import com.lazybone.hazmat.entity.MsdsChunk;
+import com.lazybone.hazmat.entity.MsdsIndexLock;
 import com.lazybone.hazmat.entity.MsdsIndexMeta;
 import com.lazybone.hazmat.entity.MsdsIndexVersion;
 import com.lazybone.hazmat.msds.ai.AiProperties;
@@ -15,13 +17,17 @@ import com.lazybone.hazmat.msds.knowledge.TextChunk;
 import com.lazybone.hazmat.repository.ChemicalRepository;
 import com.lazybone.hazmat.repository.KnowledgeDocumentRepository;
 import com.lazybone.hazmat.repository.MsdsChunkRepository;
+import com.lazybone.hazmat.repository.MsdsIndexLockRepository;
 import com.lazybone.hazmat.repository.MsdsIndexMetaRepository;
 import com.lazybone.hazmat.repository.MsdsIndexVersionRepository;
+import jakarta.persistence.PessimisticLockException;
+import jakarta.persistence.QueryTimeoutException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
 import org.springframework.core.io.support.ResourcePatternResolver;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -37,6 +43,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -63,11 +70,15 @@ public class MsdsIndexService {
     /** msds_index_meta 固定一行 */
     private static final int META_ID = 1;
 
+    /** 本实例标识，写进锁行，便于排查「上次是谁在重建」 */
+    private final String instanceId = UUID.randomUUID().toString();
+
     private final MsdsChunkRepository chunkRepository;
     private final ChemicalRepository chemicalRepository;
     private final KnowledgeDocumentRepository documentRepository;
     private final MsdsIndexMetaRepository metaRepository;
     private final MsdsIndexVersionRepository versionRepository;
+    private final MsdsIndexLockRepository lockRepository;
     private final ChunkerRegistry chunkers;
     private final AiProperties aiProperties;
     private final TransactionTemplate transactionTemplate;
@@ -77,17 +88,28 @@ public class MsdsIndexService {
      * 重建是「先查旧块、再删新增」的读改写，两个请求同时进来会各插一份同样内容。
      * 锁必须包住整个事务，而不是只包住方法体：{@code @Transactional} 的提交发生在
      * 代理返回之后，方法体内 unlock 时另一个线程仍看不到已提交的数据。
-     * 单实例内的锁；多实例部署要靠数据库唯一约束或分布式锁，当前项目是单实例。
+     *
+     * <p>这只是单实例内的锁：多实例下它挡不住另一个进程，跨实例串行靠
+     * {@link #acquireDatabaseLock()} 锁住的 {@code msds_index_lock} 行。两层都要保留——
+     * 本地锁省掉同一实例内的数据库锁争用，行锁才是真正保证正确性的一层。
      */
     private final ReentrantLock rebuildLock = new ReentrantLock();
 
     private volatile MsdsLiteralIndex literalIndex = MsdsLiteralIndex.empty();
+
+    /**
+     * 内存索引对应的 active 版本。其他实例重建并切换版本后，本实例靠它发现差异。
+     * 只在 {@link #refreshFromDatabase()} 里更新——它和 {@code literalIndex} 必须成对改，
+     * 分开写会出现「索引是新版本、版本号是旧值」这种半更新状态。
+     */
+    private volatile String literalIndexVersion;
 
     public MsdsIndexService(MsdsChunkRepository chunkRepository,
                             ChemicalRepository chemicalRepository,
                             KnowledgeDocumentRepository documentRepository,
                             MsdsIndexMetaRepository metaRepository,
                             MsdsIndexVersionRepository versionRepository,
+                            MsdsIndexLockRepository lockRepository,
                             ChunkerRegistry chunkers,
                             AiProperties aiProperties,
                             TransactionTemplate transactionTemplate) {
@@ -96,6 +118,7 @@ public class MsdsIndexService {
         this.documentRepository = documentRepository;
         this.metaRepository = metaRepository;
         this.versionRepository = versionRepository;
+        this.lockRepository = lockRepository;
         this.chunkers = chunkers;
         this.aiProperties = aiProperties;
         this.transactionTemplate = transactionTemplate;
@@ -129,7 +152,10 @@ public class MsdsIndexService {
     public RebuildResult rebuild() {
         rebuildLock.lock();
         try {
-            RebuildResult result = transactionTemplate.execute(status -> doRebuild());
+            RebuildResult result = withDatabaseLock(() -> transactionTemplate.execute(status -> {
+                acquireDatabaseLock();
+                return doRebuild();
+            }));
             refreshFromDatabase();
             return result;
         } finally {
@@ -341,12 +367,48 @@ public class MsdsIndexService {
     public RollbackResult rollback() {
         rebuildLock.lock();
         try {
-            RollbackResult result = transactionTemplate.execute(status -> doRollback());
+            RollbackResult result = withDatabaseLock(() -> transactionTemplate.execute(status -> {
+                acquireDatabaseLock();
+                return doRollback();
+            }));
             refreshFromDatabase();
             return result;
         } finally {
             rebuildLock.unlock();
         }
+    }
+
+    /**
+     * 把「本地锁 + 事务」包成一次带数据库行锁的执行。
+     *
+     * <p>本地 {@link ReentrantLock} 只能挡住同一实例；跨实例必须靠数据库行锁。
+     * 锁在事务内先取，重建/回滚的读写因此串行；事务提交或回滚时数据库自动放锁，
+     * 实例崩溃导致连接断开时也一样，不需要额外的解锁路径。
+     *
+     * <p>锁等待超时翻译成 409 业务错误，而不是把数据库的超时异常直接抛给调用方：
+     * 对使用者来说，「另一个实例正在重建」是可重试的冲突，不是服务器故障。
+     */
+    private <T> T withDatabaseLock(java.util.function.Supplier<T> action) {
+        try {
+            return action.get();
+        } catch (PessimisticLockingFailureException | PessimisticLockException | QueryTimeoutException e) {
+            // H2 锁超时抛的是 PessimisticLockingFailureException，MySQL 常抛 CannotAcquireLockException
+            // （后者是前者的子类）；只抓子类会让 H2 上的锁等待直接穿透成 500。
+            log.warn("获取索引重建行锁超时，另一个实例正在重建", e);
+            throw new ConflictException("另一个实例正在重建索引，请稍后重试");
+        }
+    }
+
+    /**
+     * 在事务内先锁住固定行，再改动数据。放在事务里而不是方法开头：
+     * 锁必须和重建的读写处在同一个事务，否则事务提交前锁就释放了，另一个实例能进来。
+     */
+    private void acquireDatabaseLock() {
+        MsdsIndexLock lock = lockRepository.findForUpdate()
+                .orElseThrow(() -> new IllegalStateException("msds_index_lock 缺少 id=1 的行"));
+        lock.setOwner(instanceId);
+        lock.setAcquiredAt(LocalDateTime.now());
+        lockRepository.save(lock);
     }
 
     private RollbackResult doRollback() {
@@ -382,7 +444,10 @@ public class MsdsIndexService {
 
     /** 库里有数据但内存索引为空（例如重启后未重建）时，直接从库里恢复索引，不再扫文件 */
     public void refreshFromDatabase() {
-        List<MsdsChunk> chunks = activeChunks();
+        String active = activeVersion();
+        List<MsdsChunk> chunks = active == null
+                ? chunkRepository.findByIndexVersionIsNullOrderByCasNoAscSectionNoAscPartNoAsc()
+                : chunkRepository.findByIndexVersionOrderByCasNoAscSectionNoAscPartNoAsc(active);
         Map<String, String> namesByCas = new HashMap<>();
         chemicalRepository.findAll()
                 .forEach(chemical -> namesByCas.put(chemical.getCasNo(), chemical.getName()));
@@ -393,6 +458,26 @@ public class MsdsIndexService {
             }
         }
         literalIndex = MsdsLiteralIndex.build(chunks, namesByCas);
+        literalIndexVersion = active;
+    }
+
+    /**
+     * 其他实例切换了 active 版本时，重建本实例的内存索引。
+     *
+     * <p>只比较版本号，不比较块内容：版本号由重建生成，切换版本必然发生在重建提交之后，
+     * 版本一致就代表内存索引与库同源。没有版本化之前的历史数据（active 为 null）
+     * 与「内存也是 null」视为一致，不会每 30 秒重复扫一次全表。
+     *
+     * @return 是否真的重建了
+     */
+    public boolean refreshIfVersionChanged() {
+        String active = activeVersion();
+        if (Objects.equals(active, literalIndexVersion)) {
+            return false;
+        }
+        log.info("检测到索引版本变化: {} → {}，刷新本实例内存索引", literalIndexVersion, active);
+        refreshFromDatabase();
+        return true;
     }
 
     public MsdsLiteralIndex literalIndex() {

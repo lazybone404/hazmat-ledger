@@ -137,6 +137,20 @@ public interface MsdsEncodeTaskRepository extends JpaRepository<MsdsEncodeTask, 
                                    @Param("cutoff") LocalDateTime cutoff,
                                    Pageable pageable);
 
+    /**
+     * 保留清理：只删终态且完成时间早于阈值的任务。
+     *
+     * <p>{@code finishedAt} 为空的行不会被误删——PENDING / RUNNING 没有完成时间，
+     * FAILED 在 {@code markFailed} 时会把 finishedAt 置空，都不满足条件。
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            delete from MsdsEncodeTask t
+             where t.status in :statuses and t.finishedAt is not null and t.finishedAt < :cutoff
+            """)
+    int deleteFinishedBefore(@Param("statuses") Collection<MsdsEncodeTaskStatus> statuses,
+                             @Param("cutoff") LocalDateTime cutoff);
+
     /** relay 用：RUNNING 超过租约没有更新，视为持有者已经失联 */
     @Query("""
             select t from MsdsEncodeTask t
