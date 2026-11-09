@@ -46,7 +46,7 @@
 ```bash
 export JAVA_HOME="/c/Program Files/Java/jdk-21.0.11"   # 见下方「环境要求」
 ./mvnw spring-boot:run        # 端口 8090，启动后自动灌 18 条试剂档案、21 个批次
-./mvnw test                   # 268 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
+./mvnw test                   # 273 个测试，不需要任何中间件；E4/E8 对照、E9 生成评测与 pgvector 集成测试需外部服务或压测开关，默认跳过（9 个）
                               # MySQL 实机与 RabbitMQ 链路是 *IT（4 + 1 个），不参与默认执行，见下文
 ```
 
@@ -746,6 +746,7 @@ src/test/java/com/lazybone/hazmat/
 ├── EncodeTaskRetentionTest 只删 DONE/DEAD 且早于保留期的任务，RUNNING 不动
 ├── EncodeTaskMessageRecovererTest  重试耗尽标 DEAD 后仍抛拒绝异常；无 taskId 只进 DLQ 不碰库
 ├── MsdsIndexLockTest       两个实例并发重建串行完成，不产生重复块
+├── ops/MsdsIndexRefreshJobTest  版本变化时字面索引与向量快照一起刷新，未变化不碰，异常不外抛
 ├── MsdsIndexLockConflictTest  抢锁超过等待上限时翻译成可重试的业务冲突
 ├── TokenVersionServiceTest token 版本缓存：TTL 为 0 每次回源、TTL 内命中、evict 后回源、null 也缓存
 ├── IncompatibilityTest     同柜/分柜/未覆盖三分类、多柜位求交集、无规则显式未覆盖、依据三态与覆盖率、401/404
@@ -754,7 +755,7 @@ src/test/java/com/lazybone/hazmat/
 ├── QuantityRangeTest       四个数量入口超过 DECIMAL(12,3) 上限时被校验挡下（400 而非 500）
 ├── service/DocumentNoServiceTest  同实例并发不重、两个实例共享分配器不重、号段推进、撞号后重新申请
 ├── MySqlMigrationIT        MySQL 8.4 实机：Flyway V1–V17、新表列与索引、中文往返、唯一约束与 CHECK、分页（*IT，默认不跑）
-├── MsdsEncodeMqIT          RabbitMQ 实机：投递 → claim → 编码 → DONE（*IT，默认不跑，需 Docker）
+├── MsdsEncodeMqIT          RabbitMQ 实机：投递 → claim → 编码 → DONE，另验证 DLX/DLQ 拓扑（*IT，默认不跑，需 Docker）
 └── msds/                   MsdsChunkerTest 切块 / MsdsSearchTest 检索与增量重建
                             MsdsFusionTest 融合元数据 / MsdsSearchDegradeTest 降级
                             MsdsRetrievalEvalTest 24 题 Hit@5
