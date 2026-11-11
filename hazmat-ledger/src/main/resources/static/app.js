@@ -198,6 +198,10 @@
                 }
                 return String(value).replace('T', ' ').slice(0, 19);
             },
+            score(value) {
+                const n = Number(value);
+                return Number.isFinite(n) ? n.toFixed(3) : this.num(value);
+            },
             statusLabel(status) {
                 return STATUS_LABELS[status] || status || '—';
             },
@@ -270,6 +274,11 @@
                     { path: '/ops', label: '运维告警', admin: true },
                     { path: '/users', label: '用户管理', admin: true }
                 ].filter(item => !item.admin || (store.user && store.user.role === 'ADMIN'));
+            },
+            currentLabel() {
+                const hit = this.navItems.find(item =>
+                    this.path === item.path || this.path.indexOf(item.path + '/') === 0);
+                return hit ? hit.label : '页面';
             }
         },
         methods: {
@@ -292,18 +301,32 @@
 </div>
 <div v-else class="app-shell">
     <aside class="sidebar">
-        <div class="brand">危化品台账</div>
+        <div class="brand">
+            <span class="brand-mark">危</span>
+            <span class="brand-text">
+                <strong>危化品台账</strong>
+                <small>LAB INVENTORY</small>
+            </span>
+        </div>
+        <div class="nav-label">工作区</div>
         <a v-for="item in navItems" :key="item.path" class="nav-link"
            :class="{ active: path === item.path || path.indexOf(item.path + '/') === 0 }"
            :href="'#' + item.path">{{ item.label }}</a>
         <div class="foot">
-            <div>{{ store.user.displayName }}</div>
-            <div>{{ store.user.username }} · {{ roleLabel(store.user.role) }}</div>
+            <span class="avatar">{{ (store.user.displayName || store.user.username).slice(0, 1) }}</span>
+            <div>
+                <div class="foot-name">{{ store.user.displayName }}</div>
+                <div>{{ roleLabel(store.user.role) }}</div>
+            </div>
         </div>
     </aside>
     <div class="main">
         <header class="topbar">
-            <span class="hint">演示环境 · 数据仅用于流程验证</span>
+            <span class="crumb">
+                <span>工作台</span>
+                <span class="sep">/</span>
+                <strong>{{ currentLabel }}</strong>
+            </span>
             <span class="who">
                 <strong>{{ store.user.displayName }}</strong>（{{ roleLabel(store.user.role) }}）
                 <button class="btn ghost sm" style="margin-left:8px" @click="logout">退出</button>
@@ -358,24 +381,37 @@
             }
         },
         template: `
-<div class="auth-card">
-    <div class="brand">危化品台账</div>
-    <p class="sub">实验室试剂全流程演示</p>
-    <div v-if="error" class="alert error">{{ error }}</div>
-    <form @submit.prevent="submit">
-        <label class="field"><span>用户名</span>
-            <input v-model.trim="username" autocomplete="username" required>
-        </label>
-        <label class="field"><span>密码</span>
-            <input v-model="password" type="password" autocomplete="current-password" required>
-        </label>
-        <button class="btn" type="submit" :disabled="loading" style="width:100%">
-            {{ loading ? '登录中…' : '登录' }}
-        </button>
-    </form>
-    <p class="hint" style="margin-top:14px">
-        没有账号？<a href="#/register">提交注册申请</a>，管理员启用后才能登录。
-    </p>
+<div class="auth-layout">
+    <aside class="auth-brand">
+        <div class="logo-row"><span class="brand-mark">危</span><span>危化品台账</span></div>
+        <h2>实验室试剂的<br>全流程台账</h2>
+        <p>从建档、入库，到领用审批、盘点、报废，每一步都有单据和留痕。</p>
+        <ul>
+            <li>高危试剂双人复核</li>
+            <li>批次级库存与台账对账</li>
+            <li>MSDS 检索与安全摘要</li>
+        </ul>
+        <div class="auth-brand-foot">演示环境 · 数据仅用于流程验证</div>
+    </aside>
+    <div class="auth-card">
+        <div class="brand">登录</div>
+        <p class="sub">使用实验室账号进入台账系统</p>
+        <div v-if="error" class="alert error">{{ error }}</div>
+        <form @submit.prevent="submit">
+            <label class="field"><span>用户名</span>
+                <input v-model.trim="username" autocomplete="username" required>
+            </label>
+            <label class="field"><span>密码</span>
+                <input v-model="password" type="password" autocomplete="current-password" required>
+            </label>
+            <button class="btn" type="submit" :disabled="loading" style="width:100%">
+                {{ loading ? '登录中…' : '登录' }}
+            </button>
+        </form>
+        <p class="hint" style="margin-top:14px">
+            没有账号？<a href="#/register">提交注册申请</a>，管理员启用后才能登录。
+        </p>
+    </div>
 </div>`
     });
 
@@ -830,7 +866,7 @@
                     <div class="hit" v-for="(h, i) in safety.hits" :key="i">
                         <div class="hit-head">
                             <strong>第 {{ h.sectionNo }} 节 · {{ h.sectionTitle }}</strong>
-                            <span class="hint">score {{ h.score }}</span>
+                            <span class="hint">score {{ score(h.score) }}</span>
                         </div>
                         <div class="hit-body">{{ h.content }}</div>
                     </div>
@@ -1712,7 +1748,7 @@
             <div class="hit" v-for="(h, i) in searchResult.hits" :key="i">
                 <div class="hit-head">
                     <strong>{{ h.chemicalName }} · 第 {{ h.sectionNo }} 节 · {{ h.sectionTitle }}</strong>
-                    <span class="hint">score {{ h.score }}<span v-if="h.docType"> · {{ h.docType }}</span></span>
+                    <span class="hint">score {{ score(h.score) }}<span v-if="h.docType"> · {{ h.docType }}</span></span>
                 </div>
                 <div class="hit-body">{{ h.content }}</div>
                 <div class="hint">来源：{{ h.sources.join('、') }}</div>
